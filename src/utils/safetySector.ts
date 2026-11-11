@@ -40,8 +40,8 @@ export function calculateDangerZones(
   bufferDegrees: number = 15
 ): DangerZone[] {
   return neighbors
-    .filter(n => n.id !== currentStand.id)
-    .map(neighbor => {
+    .filter((n) => n.id !== currentStand.id)
+    .map((neighbor) => {
       const centerAngle = calculateBearing(currentStand, neighbor);
       const startAngle = (centerAngle - bufferDegrees + 360) % 360;
       const endAngle = (centerAngle + bufferDegrees) % 360;
@@ -64,12 +64,10 @@ export function isDirectionSafe(angle: number, dangerZones: DangerZone[]): boole
 
   for (const zone of dangerZones) {
     if (zone.startAngle > zone.endAngle) {
-      // Ylittää pohjoissuunnan (0 astetta), esim. 345 -> 15
       if (normalizedAngle >= zone.startAngle || normalizedAngle <= zone.endAngle) {
         return false;
       }
     } else {
-      // Normaali väli, esim. 75 -> 105
       if (normalizedAngle >= zone.startAngle && normalizedAngle <= zone.endAngle) {
         return false;
       }
@@ -77,4 +75,58 @@ export function isDirectionSafe(angle: number, dangerZones: DangerZone[]): boole
   }
 
   return true;
+}
+
+/**
+ * Laskee uuden koordinaattipisteen etäisyyden ja suuntiman perusteella.
+ */
+function destinationPoint(
+  start: Coordinates,
+  distanceMeters: number,
+  bearingDegrees: number
+): Coordinates {
+  const earthRadius = 6371000;
+  const angularDist = distanceMeters / earthRadius;
+  const bearingRad = toRadians(bearingDegrees);
+  const lat1 = toRadians(start.latitude);
+  const lon1 = toRadians(start.longitude);
+
+  const sinLat2 =
+    Math.sin(lat1) * Math.cos(angularDist) +
+    Math.cos(lat1) * Math.sin(angularDist) * Math.cos(bearingRad);
+  const lat2 = Math.asin(sinLat2);
+  const y = Math.sin(bearingRad) * Math.sin(angularDist) * Math.cos(lat1);
+  const x = Math.cos(angularDist) - Math.sin(lat1) * sinLat2;
+  const lon2 = lon1 + Math.atan2(y, x);
+
+  return {
+    latitude: toDegrees(lat2),
+    longitude: toDegrees(lon2),
+  };
+}
+
+/**
+ * Muodostaa kartalle piirrettävän sektorin (Polygon) koordinaatit.
+ */
+export function generateSectorPolygonCoordinates(
+  center: Coordinates,
+  startAngle: number,
+  endAngle: number,
+  radiusMeters: number = 300,
+  stepDegrees: number = 5
+): Coordinates[] {
+  const points: Coordinates[] = [{ ...center }];
+
+  let diff = (endAngle - startAngle + 360) % 360;
+  if (diff === 0) diff = 360;
+
+  const steps = Math.max(2, Math.ceil(diff / stepDegrees));
+  for (let i = 0; i <= steps; i++) {
+    const angle = (startAngle + (diff * i) / steps) % 360;
+    points.push(destinationPoint(center, radiusMeters, angle));
+  }
+
+  points.push({ ...center });
+
+  return points;
 }

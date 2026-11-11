@@ -7,9 +7,14 @@ import {
   ScrollView,
   SafeAreaView,
   StatusBar,
+  Dimensions,
 } from 'react-native';
+import MapView, { Polygon, Marker } from 'react-native-maps';
 import { parseOmaRiistaGeoJSON, Stand } from './src/utils/omariistaParser';
-import { calculateDangerZones } from './src/utils/safetySector';
+import {
+  calculateDangerZones,
+  generateSectorPolygonCoordinates,
+} from './src/utils/safetySector';
 import {
   createInitialHunterState,
   selectStand,
@@ -18,6 +23,8 @@ import {
   resolveShotOutcome,
   cancelShotReport,
 } from './src/utils/huntingState';
+
+const { width } = Dimensions.get('window');
 
 const MOCK_OMARIISTA_GEOJSON = {
   type: 'FeatureCollection',
@@ -51,12 +58,12 @@ const MOCK_OMARIISTA_GEOJSON = {
     {
       type: 'Feature',
       geometry: { type: 'Point', coordinates: [24.07, 61.05] },
-      properties: { id: 'p3', name: 'P3 Tiehaara (ItÃ¤)' },
+      properties: { id: 'p3', name: 'P3 Tiehaara (Itä)' },
     },
     {
       type: 'Feature',
       geometry: { type: 'Point', coordinates: [24.03, 61.05] },
-      properties: { id: 'p4', name: 'P4 Oja (LÃ¤nsi)' },
+      properties: { id: 'p4', name: 'P4 Oja (Länsi)' },
     },
   ],
 };
@@ -81,25 +88,43 @@ export default function App() {
     return calculateDangerZones(selectedStand, huntingArea.stands);
   }, [selectedStand, huntingArea.stands]);
 
+  // Kartan alkukeskitys
+  const initialRegion = {
+    latitude: 61.055,
+    longitude: 24.05,
+    latitudeDelta: 0.03,
+    longitudeDelta: 0.05,
+  };
+
+  // Vihreä 120 asteen ampumasektori (300° - 60° pohjoiseen)
+  const safeSectorCoords = useMemo(() => {
+    if (!selectedStand) return [];
+    return generateSectorPolygonCoordinates(selectedStand, 300, 60, 450);
+  }, [selectedStand]);
+
+  // Punaiset kieltokulmakiilat naapureihin
+  const dangerZonePolygons = useMemo(() => {
+    if (!selectedStand) return [];
+    return dangerZones.map((zone) => ({
+      standId: zone.standId,
+      coordinates: generateSectorPolygonCoordinates(
+        selectedStand,
+        zone.startAngle,
+        zone.endAngle,
+        500
+      ),
+    }));
+  }, [selectedStand, dangerZones]);
+
   const handleSelectStand = (stand: Stand) => {
     setHunterState((prev) => selectStand(prev, stand.id, stand.name));
   };
 
-  const handleReady = () => {
-    setHunterState((prev) => setHunterReady(prev));
-  };
-
-  const handleShotFired = () => {
-    setHunterState((prev) => reportShotFired(prev));
-  };
-
-  const handleOutcome = (outcome: 'HARVEST' | 'MISS' | 'WOUNDED') => {
+  const handleReady = () => setHunterState((prev) => setHunterReady(prev));
+  const handleShotFired = () => setHunterState((prev) => reportShotFired(prev));
+  const handleOutcome = (outcome: 'HARVEST' | 'MISS' | 'WOUNDED') =>
     setHunterState((prev) => resolveShotOutcome(prev, outcome));
-  };
-
-  const handleCancelShot = () => {
-    setHunterState((prev) => cancelShotReport(prev));
-  };
+  const handleCancelShot = () => setHunterState((prev) => cancelShotReport(prev));
 
   const lastShotLabel = hunterState.lastShot
     ? `Viimeisin laukaus: ${hunterState.lastShot.outcome} (${new Date(
@@ -111,6 +136,7 @@ export default function App() {
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="light-content" />
       <ScrollView contentContainerStyle={styles.container}>
+        {/* Yläpalkki */}
         <View style={styles.header}>
           <Text style={styles.appName}>HunterTracker POC</Text>
           <Text style={styles.subTitle}>
@@ -118,6 +144,7 @@ export default function App() {
           </Text>
         </View>
 
+        {/* Tilakortti */}
         <View
           style={[
             styles.statusCard,
@@ -137,6 +164,61 @@ export default function App() {
           )}
         </View>
 
+        {/* INTERAKTIIVINEN KARTTANÄKYMÄ */}
+        <View style={styles.mapContainer}>
+          <Text style={styles.sectionTitle}>KARTTA JA SEKTORIT</Text>
+          <MapView style={styles.map} initialRegion={initialRegion}>
+            {/* Jahtialueen ulkorajat */}
+            {huntingArea.boundary && (
+              <Polygon
+                coordinates={huntingArea.boundary.coordinates}
+                strokeColor="#4CAF50"
+                fillColor="rgba(76, 175, 80, 0.12)"
+                strokeWidth={2}
+              />
+            )}
+
+            {/* Sallittu vihreä ampumakiila */}
+            {safeSectorCoords.length > 0 && (
+              <Polygon
+                coordinates={safeSectorCoords}
+                strokeColor="#2E7D32"
+                fillColor="rgba(46, 125, 50, 0.35)"
+                strokeWidth={1}
+              />
+            )}
+
+            {/* Punaiset naapurikieltokulmat */}
+            {dangerZonePolygons.map((dz) => (
+              <Polygon
+                key={dz.standId}
+                coordinates={dz.coordinates}
+                strokeColor="#D32F2F"
+                fillColor="rgba(211, 47, 47, 0.45)"
+                strokeWidth={1}
+              />
+            ))}
+
+            {/* Passipaikkojen markerit */}
+            {huntingArea.stands.map((stand) => {
+              const isSelected = stand.id === hunterState.currentStandId;
+              return (
+                <Marker
+                  key={stand.id}
+                  coordinate={{
+                    latitude: stand.latitude,
+                    longitude: stand.longitude,
+                  }}
+                  title={stand.name}
+                  pinColor={isSelected ? 'green' : 'orange'}
+                  onPress={() => handleSelectStand(stand)}
+                />
+              );
+            })}
+          </MapView>
+        </View>
+
+        {/* 1. Passin valintalista */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>1. VALITSE OMA PASSI</Text>
           <View style={styles.standGrid}>
@@ -163,22 +245,23 @@ export default function App() {
           </View>
         </View>
 
+        {/* 2. Turvallisuussektori tekstinä */}
         {selectedStand && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>2. AMPUMATURVALLISUUS</Text>
             <View style={styles.safetyBox}>
               <Text style={styles.safetyMain}>
-                Sallittu pÃ¤Ã¤sektori: vihreÃ¤ 120Â°
+                Sallittu pääsektori: vihreä 120°
               </Text>
               <Text style={styles.dangerHeader}>
-                Lasketut naapurikieltokulmat (Â±15Â°):
+                Lasketut naapurikieltokulmat (±15°):
               </Text>
               {dangerZones.map((zone) => (
                 <View key={zone.standId} style={styles.dangerRow}>
                   <Text style={styles.dangerStand}>{zone.standName}:</Text>
                   <Text style={styles.dangerDegrees}>
-                    suunta {Math.round(zone.centerAngle)}Â° (KIELTO{' '}
-                    {Math.round(zone.startAngle)}Â° - {Math.round(zone.endAngle)}Â°)
+                    suunta {Math.round(zone.centerAngle)}° (KIELTO{' '}
+                    {Math.round(zone.startAngle)}° - {Math.round(zone.endAngle)}°)
                   </Text>
                 </View>
               ))}
@@ -186,6 +269,7 @@ export default function App() {
           </View>
         )}
 
+        {/* 3. Hanskaystävälliset pikanapit */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>3. TILANNEKUYITTAUS</Text>
 
@@ -330,6 +414,20 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#FFF59D',
     marginTop: 6,
+  },
+  mapContainer: {
+    marginBottom: 20,
+    borderRadius: 8,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#1C261C',
+    backgroundColor: '#121812',
+    padding: 8,
+  },
+  map: {
+    width: width - 48,
+    height: 300,
+    borderRadius: 6,
   },
   section: {
     marginBottom: 20,
