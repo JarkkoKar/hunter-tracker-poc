@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   StyleSheet,
   Text,
@@ -9,11 +9,15 @@ import {
   StatusBar,
   Dimensions,
 } from 'react-native';
-import MapView, { Polygon, Marker } from 'react-native-maps';
+import MapView, { Polygon, Marker, UrlTile } from 'react-native-maps';
+import * as Location from 'expo-location';
 import { parseOmaRiistaGeoJSON, Stand } from './src/utils/omariistaParser';
 import {
   calculateDangerZones,
   generateSectorPolygonCoordinates,
+  findNearestStand,
+  calculateDistanceMeters,
+  Coordinates,
 } from './src/utils/safetySector';
 import {
   createInitialHunterState,
@@ -23,6 +27,7 @@ import {
   resolveShotOutcome,
   cancelShotReport,
 } from './src/utils/huntingState';
+import { getTopoTileConfig } from './src/utils/mapTiles';
 
 const { width } = Dimensions.get('window');
 
@@ -72,6 +77,14 @@ export default function App() {
   const [hunterState, setHunterState] = useState(() =>
     createInitialHunterState('Passimies 1')
   );
+  const [userLocation, setUserLocation] = useState<Coordinates | null>(null);
+  const [gpsStatus, setGpsStatus] = useState<string>('Haetaan GPS-yhteyttä...');
+  const [showTopoLayer, setShowTopoLayer] = useState<boolean>(true);
+
+  const tileConfig = useMemo(
+    () => getTopoTileConfig(process.env.EXPO_PUBLIC_MML_API_KEY),
+    []
+  );
 
   const huntingArea = useMemo(
     () => parseOmaRiistaGeoJSON(MOCK_OMARIISTA_GEOJSON),
@@ -88,7 +101,67 @@ export default function App() {
     return calculateDangerZones(selectedStand, huntingArea.stands);
   }, [selectedStand, huntingArea.stands]);
 
-  // Kartan alkukeskitys
+  useEffect(() => {
+    let subscriber: Location.LocationSubscription | null = null;
+
+    async function initGPS() {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          setGpsStatus('GPS-lupa evätty');
+          return;
+        }
+
+        setGpsStatus('GPS aktiivinen');
+
+        subscriber = await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.High,
+            timeInterval: 3000,
+            distanceInterval: 5,
+          },
+          (loc) => {
+            const coords = {
+              latitude: loc.coords.latitude,
+              longitude: loc.coords.longitude,
+            };
+            setUserLocation(coords);
+
+            const nearest = findNearestStand(coords, huntingArea.stands, 50);
+            if (nearest && nearest.stand.id !== hunterState.currentStandId) {
+              setHunterState((prev) =>
+                selectStand(prev, nearest.stand.id, nearest.stand.name)
+              );
+            }
+          }
+        );
+      } catch {
+        setGpsStatus('GPS-virhe');
+      }
+    }
+
+    initGPS();
+
+    return () => {
+      if (subscriber) subscriber.remove();
+    };
+  }, [huntingArea.stands, hunterState.currentStandId]);
+
+  const simulateStandArrival = (stand: Stand) => {
+    const simulatedCoords = {
+      latitude: stand.latitude + 0.00015,
+      longitude: stand.longitude,
+    };
+    setUserLocation(simulatedCoords);
+
+    const nearest = findNearestStand(simulatedCoords, huntingArea.stands, 50);
+    if (nearest) {
+      setHunterState((prev) =>
+        selectStand(prev, nearest.stand.id, nearest.stand.name)
+      );
+    }
+  };
+
   const initialRegion = {
     latitude: 61.055,
     longitude: 24.05,
@@ -96,13 +169,11 @@ export default function App() {
     longitudeDelta: 0.05,
   };
 
-  // Vihreä 120 asteen ampumasektori (300° - 60° pohjoiseen)
   const safeSectorCoords = useMemo(() => {
     if (!selectedStand) return [];
     return generateSectorPolygonCoordinates(selectedStand, 300, 60, 450);
   }, [selectedStand]);
 
-  // Punaiset kieltokulmakiilat naapureihin
   const dangerZonePolygons = useMemo(() => {
     if (!selectedStand) return [];
     return dangerZones.map((zone) => ({
@@ -132,19 +203,22 @@ export default function App() {
       ).toLocaleTimeString()})`
     : '';
 
+  const distanceToCurrentStand = useMemo(() => {
+    if (!userLocation || !selectedStand) return null;
+    return Math.round(calculateDistanceMeters(userLocation, selectedStand));
+  }, [userLocation, selectedStand]);
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="light-content" />
       <ScrollView contentContainerStyle={styles.container}>
-        {/* Yläpalkki */}
         <View style={styles.header}>
           <Text style={styles.appName}>HunterTracker POC</Text>
           <Text style={styles.subTitle}>
-            {huntingArea.boundary?.name || 'Jahtialue'}
+            {huntingArea.boundary?.name || 'Jahtialue'} | {gpsStatus}
           </Text>
         </View>
 
-        {/* Tilakortti */}
         <View
           style={[
             styles.statusCard,
@@ -157,18 +231,47 @@ export default function App() {
           <Text style={styles.statusLabel}>TILANNE:</Text>
           <Text style={styles.statusValue}>[{hunterState.status}]</Text>
           {hunterState.standName && (
-            <Text style={styles.statusStand}>Passi: {hunterState.standName}</Text>
+            <Text style={styles.statusStand}>
+              Passi: {hunterState.standName}
+              {distanceToCurrentStand !== null
+                ? ` (etäisyys ${distanceToCurrentStand} m)`
+                : ''}
+            </Text>
           )}
           {hunterState.lastShot && (
             <Text style={styles.lastShotText}>{lastShotLabel}</Text>
           )}
         </View>
 
-        {/* INTERAKTIIVINEN KARTTANÄKYMÄ */}
         <View style={styles.mapContainer}>
-          <Text style={styles.sectionTitle}>KARTTA JA SEKTORIT</Text>
-          <MapView style={styles.map} initialRegion={initialRegion}>
-            {/* Jahtialueen ulkorajat */}
+          <View style={styles.mapHeaderRow}>
+            <Text style={styles.sectionTitle}>
+              KARTTA: {showTopoLayer ? tileConfig.label.toUpperCase() : 'PERUSKARTTA'}
+            </Text>
+            <TouchableOpacity
+              style={styles.layerToggleButton}
+              onPress={() => setShowTopoLayer((prev) => !prev)}
+            >
+              <Text style={styles.layerToggleText}>
+                {showTopoLayer ? 'Maastokartta: PÄÄLLÄ' : 'Maastokartta: POIS'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <MapView
+            style={styles.map}
+            initialRegion={initialRegion}
+            mapType={showTopoLayer ? 'none' : 'standard'}
+          >
+            {showTopoLayer && (
+              <UrlTile
+                urlTemplate={tileConfig.urlTemplate}
+                maximumZ={tileConfig.maximumZ}
+                flipY={false}
+                zIndex={-1}
+              />
+            )}
+
             {huntingArea.boundary && (
               <Polygon
                 coordinates={huntingArea.boundary.coordinates}
@@ -178,7 +281,6 @@ export default function App() {
               />
             )}
 
-            {/* Sallittu vihreä ampumakiila */}
             {safeSectorCoords.length > 0 && (
               <Polygon
                 coordinates={safeSectorCoords}
@@ -188,7 +290,6 @@ export default function App() {
               />
             )}
 
-            {/* Punaiset naapurikieltokulmat */}
             {dangerZonePolygons.map((dz) => (
               <Polygon
                 key={dz.standId}
@@ -199,7 +300,6 @@ export default function App() {
               />
             ))}
 
-            {/* Passipaikkojen markerit */}
             {huntingArea.stands.map((stand) => {
               const isSelected = stand.id === hunterState.currentStandId;
               return (
@@ -215,12 +315,32 @@ export default function App() {
                 />
               );
             })}
+
+            {userLocation && (
+              <Marker
+                coordinate={userLocation}
+                title="Oma sijainti"
+                pinColor="blue"
+              />
+            )}
           </MapView>
         </View>
 
-        {/* 1. Passin valintalista */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>1. VALITSE OMA PASSI</Text>
+          <Text style={styles.sectionTitle}>GPS-AUTOMAATTI / TESTAUS</Text>
+          <TouchableOpacity
+            style={styles.simButton}
+            onPress={() => simulateStandArrival(huntingArea.stands[0])}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.simButtonText}>
+              Simuloi: Saavu passiin P1 Kuusikko (&lt; 20 m)
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>1. VALITSE OMA PASSI (MANUAALINEN)</Text>
           <View style={styles.standGrid}>
             {huntingArea.stands.map((stand) => {
               const isSelected = stand.id === hunterState.currentStandId;
@@ -245,7 +365,6 @@ export default function App() {
           </View>
         </View>
 
-        {/* 2. Turvallisuussektori tekstinä */}
         {selectedStand && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>2. AMPUMATURVALLISUUS</Text>
@@ -269,7 +388,6 @@ export default function App() {
           </View>
         )}
 
-        {/* 3. Hanskaystävälliset pikanapit */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>3. TILANNEKUYITTAUS</Text>
 
@@ -367,7 +485,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   subTitle: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#81C784',
     marginTop: 2,
   },
@@ -424,9 +542,28 @@ const styles = StyleSheet.create({
     backgroundColor: '#121812',
     padding: 8,
   },
+  mapHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  layerToggleButton: {
+    backgroundColor: '#1E2E1E',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#4CAF50',
+  },
+  layerToggleText: {
+    color: '#A5D6A7',
+    fontSize: 12,
+    fontWeight: '700',
+  },
   map: {
     width: width - 48,
-    height: 300,
+    height: 320,
     borderRadius: 6,
   },
   section: {
@@ -441,8 +578,19 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     color: '#81C784',
-    marginBottom: 12,
+    marginBottom: 8,
     letterSpacing: 0.5,
+  },
+  simButton: {
+    backgroundColor: '#1565C0',
+    paddingVertical: 14,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  simButtonText: {
+    color: '#FFFFFF',
+    fontSize: 14,
+    fontWeight: 'bold',
   },
   standGrid: {
     gap: 8,
