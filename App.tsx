@@ -40,13 +40,31 @@ import {
   canTransmitPacket,
 } from './src/utils/emconState';
 import {
-  TransportBearer,
   createInitialTransportState,
   connectUsbSerial,
   disconnectUsbSerial,
   setCellularHealth,
   routeOutgoingPacket,
 } from './src/utils/transportManager';
+import {
+  PacketType,
+  encodeEncryptedFrame,
+} from './src/utils/wireProtocol';
+import {
+  TakTargetEndpoint,
+  convertFrameToCotXml,
+  buildTakDispatchEnvelope,
+} from './src/utils/localTakBridge';
+import {
+  createInitialZeroizeState,
+  setZeroizeCoverOpen,
+  attemptSlideToZeroize,
+} from './src/utils/zeroizeService';
+import {
+  compressTrackDelta,
+  packSearchSector,
+  createPrioritySosAlert,
+} from './src/utils/sarStructures';
 
 const { width } = Dimensions.get('window');
 
@@ -92,6 +110,15 @@ const MOCK_OMARIISTA_GEOJSON = {
   ],
 };
 
+const SAMPLE_SAR_SECTOR_VERTICES: Coordinates[] = [
+  { latitude: 61.052, longitude: 24.042 },
+  { latitude: 61.058, longitude: 24.042 },
+  { latitude: 61.061, longitude: 24.050 },
+  { latitude: 61.058, longitude: 24.058 },
+  { latitude: 61.052, longitude: 24.058 },
+  { latitude: 61.049, longitude: 24.050 },
+];
+
 export default function App() {
   const [activeProfile, setActiveProfile] = useState<ActiveProfile>(
     ActiveProfile.HUNTER
@@ -100,8 +127,16 @@ export default function App() {
   const [transportState, setTransportState] = useState(() =>
     createInitialTransportState()
   );
+  const [zeroizeState, setZeroizeState] = useState(() =>
+    createInitialZeroizeState('HTL-E2EE-ALPHA-2026', '9911')
+  );
   const [lastTxLog, setLastTxLog] = useState<string>(
-    'Valmis lähetykseen (4G/5G ensisijainen)'
+    'Valmis lähetykseen (E2EE + 4G/5G -> LoRa)'
+  );
+  const [lastCotPreview, setLastCotPreview] = useState<string>('');
+  const [showSarSector, setShowSarSector] = useState<boolean>(false);
+  const [sosLockedLocation, setSosLockedLocation] = useState<Coordinates | null>(
+    null
   );
   const [hunterState, setHunterState] = useState(() =>
     createInitialHunterState('Passimies 1')
@@ -137,21 +172,61 @@ export default function App() {
     return calculateDangerZones(selectedStand, huntingArea.stands);
   }, [selectedStand, huntingArea.stands]);
 
-  const dispatchTelemetryEvent = (eventCode: number, label: string) => {
-    const dummyBinaryPayload = new Uint8Array([0x48, 0x54, eventCode, 0x01]);
-    const result = routeOutgoingPacket(
+  const dispatchEncryptedTelemetry = (
+    packetType: PacketType,
+    statusCode: number,
+    label: string,
+    overrideCoords?: Coordinates
+  ) => {
+    if (zeroizeState.wiped) {
+      setLastTxLog('ESTETTY: Laite on ZEROIZED-tilassa (avaimet tyhjennetty)');
+      return;
+    }
+
+    const coords = overrideCoords ||
+      userLocation ||
+      selectedStand || { latitude: 61.05, longitude: 24.05 };
+
+    const timestampSec = Math.floor(Date.now() / 1000);
+    const payload = {
+      senderId: 1,
+      packetType,
+      latitude: coords.latitude,
+      longitude: coords.longitude,
+      statusCode,
+      timestampSec,
+    };
+
+    // 1. E2EE-salattu 44 tavun binäärikehys
+    const encryptedFrame = encodeEncryptedFrame(
+      payload,
+      zeroizeState.activeSecretKey
+    );
+
+    // 2. Reititys aktiiviselle siirtotielle (EMCON-valvottu)
+    const routeResult = routeOutgoingPacket(
       transportState,
       emconState,
-      dummyBinaryPayload
+      encryptedFrame
+    );
+
+    // 3. CoT XML -käännös paikalliselle ATAK-sillalle
+    const cotXml = convertFrameToCotXml(payload, activeProfile);
+    const takEnv = buildTakDispatchEnvelope(
+      cotXml,
+      TakTargetEndpoint.ATAK_MULTICAST
+    );
+    setLastCotPreview(
+      `CoT -> ${takEnv.host}:${takEnv.port} (${cotXml.match(/type="([^"]+)"/)?.[1] || ''})`
     );
 
     const timeStr = new Date().toLocaleTimeString();
-    if (result.dispatched) {
+    if (routeResult.dispatched) {
       setLastTxLog(
-        `${timeStr} | ${label} -> ${result.bearerUsed} (${result.payloadBytes} B)`
+        `${timeStr} | E2EE ${label} -> ${routeResult.bearerUsed} (${routeResult.payloadBytes} B)`
       );
     } else {
-      setLastTxLog(`${timeStr} | ESTETTY (${result.reason})`);
+      setLastTxLog(`${timeStr} | ESTETTY (${routeResult.reason})`);
     }
   };
 
@@ -213,8 +288,51 @@ export default function App() {
       setHunterState((prev) =>
         selectStand(prev, nearest.stand.id, nearest.stand.name)
       );
-      dispatchTelemetryEvent(0x10, `AUTO-PASSI ${nearest.stand.id}`);
+      dispatchEncryptedTelemetry(
+        PacketType.POSITION,
+        0x10,
+        `AUTO-PASSI ${nearest.stand.id}`,
+        simulatedCoords
+      );
     }
+  };
+
+  const handleSendTrackDelta = () => {
+    const base = userLocation || selectedStand || { latitude: 61.05, longitude: 24.05 };
+    const sampleTrack: Coordinates[] = [
+      base,
+      { latitude: base.latitude + 0.0004, longitude: base.longitude + 0.0004 },
+      { latitude: base.latitude + 0.0008, longitude: base.longitude + 0.0009 },
+      { latitude: base.latitude + 0.0012, longitude: base.longitude + 0.0015 },
+    ];
+    const delta = compressTrackDelta(1, sampleTrack, 25);
+    const route = routeOutgoingPacket(transportState, emconState, delta.binaryFrame);
+    setLastTxLog(
+      route.dispatched
+        ? `TRACK_DELTA (${delta.points.length} pistettä, ${delta.binaryFrame.byteLength} B) -> ${route.bearerUsed}`
+        : `TRACK_DELTA ESTETTY (${route.reason})`
+    );
+  };
+
+  const handleToggleSearchSector = () => {
+    const next = !showSarSector;
+    setShowSarSector(next);
+    if (next) {
+      const sector = packSearchSector('Etsintälohko Alpha', SAMPLE_SAR_SECTOR_VERTICES);
+      const route = routeOutgoingPacket(transportState, emconState, sector.binaryFrame);
+      setLastTxLog(
+        route.dispatched
+          ? `SEARCH_SECTOR (${sector.vertices.length} kärkeä, ${sector.binaryFrame.byteLength} B) -> ${route.bearerUsed}`
+          : `SEARCH_SECTOR ESTETTY (${route.reason})`
+      );
+    }
+  };
+
+  const handleTriggerSos = () => {
+    const loc = userLocation || selectedStand || { latitude: 61.052, longitude: 24.053 };
+    const sos = createPrioritySosAlert(1, loc);
+    setSosLockedLocation(sos.location);
+    dispatchEncryptedTelemetry(PacketType.SOS_ALERT, 0xff, 'SOS_ALERT (HÄTÄ)', loc);
   };
 
   const toggleCellularOutage = () => {
@@ -270,25 +388,25 @@ export default function App() {
 
   const handleSelectStand = (stand: Stand) => {
     setHunterState((prev) => selectStand(prev, stand.id, stand.name));
-    dispatchTelemetryEvent(0x11, `VALINTA ${stand.id}`);
+    dispatchEncryptedTelemetry(PacketType.POSITION, 0x11, `VALINTA ${stand.id}`);
   };
 
   const handleReady = () => {
     if (!txAllowed) return;
     setHunterState((prev) => setHunterReady(prev));
-    dispatchTelemetryEvent(0x12, 'VALMIS');
+    dispatchEncryptedTelemetry(PacketType.POSITION, 0x12, 'VALMIS');
   };
 
   const handleShotFired = () => {
     if (!txAllowed) return;
     setHunterState((prev) => reportShotFired(prev));
-    dispatchTelemetryEvent(0x20, 'LAUKAUS');
+    dispatchEncryptedTelemetry(PacketType.SHOT_ALERT, 0x20, 'LAUKAUS');
   };
 
   const handleOutcome = (outcome: 'HARVEST' | 'MISS' | 'WOUNDED') => {
     if (!txAllowed) return;
     setHunterState((prev) => resolveShotOutcome(prev, outcome));
-    dispatchTelemetryEvent(0x21, `TULOS:${outcome}`);
+    dispatchEncryptedTelemetry(PacketType.SHOT_ALERT, 0x21, `TULOS:${outcome}`);
   };
 
   const handleCancelShot = () => setHunterState((prev) => cancelShotReport(prev));
@@ -327,6 +445,17 @@ export default function App() {
           </Text>
         </View>
 
+        {zeroizeState.wiped && (
+          <View style={styles.wipedBanner}>
+            <Text style={styles.wipedBannerTitle}>
+              [ZEROIZED] KAIKKI AVAIMET JA PAIKALLINEN DATA TYHJENNETTY
+            </Text>
+            <Text style={styles.wipedBannerSub}>
+              Lähetetty radiolle: {zeroizeState.loraRadioCommand}
+            </Text>
+          </View>
+        )}
+
         {/* Profiilivalitsin: HUNTER / SAR / TACTICAL */}
         <View style={styles.profileRow}>
           {[ActiveProfile.HUNTER, ActiveProfile.SAR, ActiveProfile.TACTICAL].map(
@@ -359,7 +488,7 @@ export default function App() {
           )}
         </View>
 
-        {/* Hybridi & Zero-RF Siirtokerroksen ohjaus */}
+        {/* Hybridi & Zero-RF Siirtokerroksen + E2EE/CoT ohjaus */}
         <View style={styles.transportCard}>
           <View style={styles.transportHeaderRow}>
             <Text style={styles.transportTitle}>
@@ -373,11 +502,14 @@ export default function App() {
             >
               {transportState.radioBleDisabled
                 ? 'BLE: OFF (ZERO-RF)'
-                : 'BLE: STANDBY'}
+                : 'E2EE: ACTIVE'}
             </Text>
           </View>
 
           <Text style={styles.txLogText}>{lastTxLog}</Text>
+          {lastCotPreview.length > 0 && (
+            <Text style={styles.cotLogText}>{lastCotPreview}</Text>
+          )}
 
           <View style={styles.transportButtonsRow}>
             <TouchableOpacity
@@ -549,6 +681,15 @@ export default function App() {
               />
             )}
 
+            {showSarSector && (
+              <Polygon
+                coordinates={SAMPLE_SAR_SECTOR_VERTICES}
+                strokeColor="#FF9800"
+                fillColor="rgba(255, 152, 0, 0.25)"
+                strokeWidth={2}
+              />
+            )}
+
             {safeSectorCoords.length > 0 && (
               <Polygon
                 coordinates={safeSectorCoords}
@@ -591,7 +732,51 @@ export default function App() {
                 pinColor="blue"
               />
             )}
+
+            {sosLockedLocation && (
+              <Marker
+                coordinate={sosLockedLocation}
+                title="SOS HÄTÄPAIKKA"
+                pinColor="red"
+              />
+            )}
           </MapView>
+        </View>
+
+        {/* SAR & Taktiset kenttätoiminnot */}
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
+            SAR & TAKTISET TIETORAKENTEET
+          </Text>
+          <View style={styles.sarButtonsRow}>
+            <TouchableOpacity
+              style={styles.sarBtn}
+              onPress={handleSendTrackDelta}
+              disabled={!txAllowed}
+            >
+              <Text style={styles.sarBtnText}>Jaa TRACK_DELTA</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.sarBtn}
+              onPress={handleToggleSearchSector}
+              disabled={!txAllowed}
+            >
+              <Text style={styles.sarBtnText}>
+                {showSarSector ? 'Piilota Etsintälohko' : 'SEARCH_SECTOR (6p)'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity
+            style={[styles.sosButton, !txAllowed && styles.disabledButton]}
+            onPress={handleTriggerSos}
+            disabled={!txAllowed}
+          >
+            <Text style={styles.sosButtonText}>
+              [SOS_ALERT — PRIORISOITU HÄTÄILMOITUS]
+            </Text>
+          </TouchableOpacity>
         </View>
 
         <View style={styles.section}>
@@ -769,6 +954,49 @@ export default function App() {
             </TouchableOpacity>
           )}
         </View>
+
+        {/* Kaksivaiheinen Zeroize-hätätyhjennys */}
+        <View style={styles.zeroizeCard}>
+          <Text style={styles.zeroizeHeader}>
+            4. HÄTÄTYHJENNYS (ZEROIZE — KAKSIVAIHEINEN SUOJA)
+          </Text>
+          <Text style={styles.zeroizeDesc}>
+            Avaimia muistissa: {zeroizeState.wiped ? '0 (TYHJENNETTY)' : 'AKTIIVINEN'}
+          </Text>
+
+          <TouchableOpacity
+            style={[
+              styles.coverButton,
+              zeroizeState.coverOpen && styles.coverButtonOpen,
+            ]}
+            onPress={() =>
+              setZeroizeState((prev) =>
+                setZeroizeCoverOpen(prev, !prev.coverOpen)
+              )
+            }
+            disabled={zeroizeState.wiped}
+          >
+            <Text style={styles.coverButtonText}>
+              {zeroizeState.coverOpen
+                ? 'VAIHE 1: SUOJAKANSI AUKI (Napauta sulkeaksesi)'
+                : 'VAIHE 1: AVAA SUOJAKANSI'}
+            </Text>
+          </TouchableOpacity>
+
+          {zeroizeState.coverOpen && !zeroizeState.wiped && (
+            <TouchableOpacity
+              style={styles.slideZeroizeButton}
+              delayLongPress={1500}
+              onLongPress={() =>
+                setZeroizeState((prev) => attemptSlideToZeroize(prev, 95))
+              }
+            >
+              <Text style={styles.slideZeroizeText}>
+                VAIHE 2: PIDÄ POHJASSA (&gt;85% LIUKU) — ZEROIZE NYT
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -803,6 +1031,25 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontFamily: 'monospace',
     color: '#FFF59D',
+    marginTop: 4,
+  },
+  wipedBanner: {
+    backgroundColor: '#B71C1C',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 12,
+    borderWidth: 2,
+    borderColor: '#FFCDD2',
+  },
+  wipedBannerTitle: {
+    color: '#FFFFFF',
+    fontWeight: 'bold',
+    fontSize: 13,
+  },
+  wipedBannerSub: {
+    color: '#FFEBEE',
+    fontSize: 11,
+    fontFamily: 'monospace',
     marginTop: 4,
   },
   profileRow: {
@@ -858,6 +1105,12 @@ const styles = StyleSheet.create({
   },
   txLogText: {
     color: '#CFD8DC',
+    fontSize: 11,
+    fontFamily: 'monospace',
+    marginBottom: 4,
+  },
+  cotLogText: {
+    color: '#80DEEA',
     fontSize: 11,
     fontFamily: 'monospace',
     marginBottom: 8,
@@ -1034,6 +1287,36 @@ const styles = StyleSheet.create({
     marginBottom: 8,
     letterSpacing: 0.5,
   },
+  sarButtonsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 10,
+  },
+  sarBtn: {
+    flex: 1,
+    backgroundColor: '#E65100',
+    paddingVertical: 11,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  sarBtnText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  sosButton: {
+    backgroundColor: '#D50000',
+    paddingVertical: 14,
+    borderRadius: 6,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#FF8A80',
+  },
+  sosButtonText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: 'bold',
+  },
   simButton: {
     backgroundColor: '#1565C0',
     paddingVertical: 14,
@@ -1143,5 +1426,53 @@ const styles = StyleSheet.create({
     color: '#90A4AE',
     fontSize: 14,
     textDecorationLine: 'underline',
+  },
+  zeroizeCard: {
+    backgroundColor: '#1D0A0A',
+    borderRadius: 8,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: '#B71C1C',
+  },
+  zeroizeHeader: {
+    color: '#FF8A80',
+    fontSize: 13,
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  zeroizeDesc: {
+    color: '#FFCDD2',
+    fontSize: 12,
+    marginBottom: 10,
+  },
+  coverButton: {
+    backgroundColor: '#4E342E',
+    paddingVertical: 12,
+    borderRadius: 6,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#FFAB91',
+  },
+  coverButtonOpen: {
+    backgroundColor: '#BF360C',
+  },
+  coverButtonText: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  slideZeroizeButton: {
+    marginTop: 10,
+    backgroundColor: '#D50000',
+    paddingVertical: 16,
+    borderRadius: 6,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+  },
+  slideZeroizeText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: 'bold',
   },
 });
