@@ -39,6 +39,14 @@ import {
   setRadioTxMode,
   canTransmitPacket,
 } from './src/utils/emconState';
+import {
+  TransportBearer,
+  createInitialTransportState,
+  connectUsbSerial,
+  disconnectUsbSerial,
+  setCellularHealth,
+  routeOutgoingPacket,
+} from './src/utils/transportManager';
 
 const { width } = Dimensions.get('window');
 
@@ -89,6 +97,12 @@ export default function App() {
     ActiveProfile.HUNTER
   );
   const [emconState, setEmconState] = useState(() => createInitialEmconState());
+  const [transportState, setTransportState] = useState(() =>
+    createInitialTransportState()
+  );
+  const [lastTxLog, setLastTxLog] = useState<string>(
+    'Valmis lähetykseen (4G/5G ensisijainen)'
+  );
   const [hunterState, setHunterState] = useState(() =>
     createInitialHunterState('Passimies 1')
   );
@@ -122,6 +136,24 @@ export default function App() {
     if (!selectedStand) return [];
     return calculateDangerZones(selectedStand, huntingArea.stands);
   }, [selectedStand, huntingArea.stands]);
+
+  const dispatchTelemetryEvent = (eventCode: number, label: string) => {
+    const dummyBinaryPayload = new Uint8Array([0x48, 0x54, eventCode, 0x01]);
+    const result = routeOutgoingPacket(
+      transportState,
+      emconState,
+      dummyBinaryPayload
+    );
+
+    const timeStr = new Date().toLocaleTimeString();
+    if (result.dispatched) {
+      setLastTxLog(
+        `${timeStr} | ${label} -> ${result.bearerUsed} (${result.payloadBytes} B)`
+      );
+    } else {
+      setLastTxLog(`${timeStr} | ESTETTY (${result.reason})`);
+    }
+  };
 
   useEffect(() => {
     let subscriber: Location.LocationSubscription | null = null;
@@ -181,6 +213,33 @@ export default function App() {
       setHunterState((prev) =>
         selectStand(prev, nearest.stand.id, nearest.stand.name)
       );
+      dispatchTelemetryEvent(0x10, `AUTO-PASSI ${nearest.stand.id}`);
+    }
+  };
+
+  const toggleCellularOutage = () => {
+    const nextState = setCellularHealth(
+      transportState,
+      !transportState.cellularAvailable,
+      transportState.cellularAvailable ? 5000 : 80
+    );
+    setTransportState(nextState);
+    setLastTxLog(
+      nextState.cellularAvailable
+        ? '4G/5G yhteys palautettu -> Ensisijainen IP-reititys'
+        : '4G/5G katve -> Automaattinen pudotus 868 MHz LoRa Meshiin'
+    );
+  };
+
+  const toggleUsbZeroRf = () => {
+    if (!transportState.usbSerialConnected) {
+      const { state, adminCommand } = connectUsbSerial(transportState, 115200);
+      setTransportState(state);
+      setLastTxLog(`USB-C (115200 bps) kytketty | Lähetetty: ${adminCommand}`);
+    } else {
+      const state = disconnectUsbSerial(transportState);
+      setTransportState(state);
+      setLastTxLog('USB-C irrotettu | Radion 2.4 GHz BLE palautettu');
     }
   };
 
@@ -211,21 +270,25 @@ export default function App() {
 
   const handleSelectStand = (stand: Stand) => {
     setHunterState((prev) => selectStand(prev, stand.id, stand.name));
+    dispatchTelemetryEvent(0x11, `VALINTA ${stand.id}`);
   };
 
   const handleReady = () => {
     if (!txAllowed) return;
     setHunterState((prev) => setHunterReady(prev));
+    dispatchTelemetryEvent(0x12, 'VALMIS');
   };
 
   const handleShotFired = () => {
     if (!txAllowed) return;
     setHunterState((prev) => reportShotFired(prev));
+    dispatchTelemetryEvent(0x20, 'LAUKAUS');
   };
 
   const handleOutcome = (outcome: 'HARVEST' | 'MISS' | 'WOUNDED') => {
     if (!txAllowed) return;
     setHunterState((prev) => resolveShotOutcome(prev, outcome));
+    dispatchTelemetryEvent(0x21, `TULOS:${outcome}`);
   };
 
   const handleCancelShot = () => setHunterState((prev) => cancelShotReport(prev));
@@ -256,7 +319,8 @@ export default function App() {
             HunterTrackerLight // {profileConfig.id}
           </Text>
           <Text style={styles.subTitle}>
-            {profileConfig.areaLabel}: {huntingArea.boundary?.name || 'Alue 1'} | {gpsStatus}
+            {profileConfig.areaLabel}: {huntingArea.boundary?.name || 'Alue 1'} |{' '}
+            {gpsStatus}
           </Text>
           <Text style={styles.coordDisplay}>
             [{profileConfig.coordinateSystem}] {formattedUserCoords}
@@ -293,6 +357,57 @@ export default function App() {
               );
             }
           )}
+        </View>
+
+        {/* Hybridi & Zero-RF Siirtokerroksen ohjaus */}
+        <View style={styles.transportCard}>
+          <View style={styles.transportHeaderRow}>
+            <Text style={styles.transportTitle}>
+              SIIRTOTIE: [{transportState.activeBearer}]
+            </Text>
+            <Text
+              style={[
+                styles.bleBadge,
+                transportState.radioBleDisabled && styles.bleDisabledBadge,
+              ]}
+            >
+              {transportState.radioBleDisabled
+                ? 'BLE: OFF (ZERO-RF)'
+                : 'BLE: STANDBY'}
+            </Text>
+          </View>
+
+          <Text style={styles.txLogText}>{lastTxLog}</Text>
+
+          <View style={styles.transportButtonsRow}>
+            <TouchableOpacity
+              style={[
+                styles.transportToggleBtn,
+                !transportState.cellularAvailable && styles.transportWarnBtn,
+              ]}
+              onPress={toggleCellularOutage}
+            >
+              <Text style={styles.transportBtnText}>
+                {transportState.cellularAvailable
+                  ? '4G/5G: OK (Simuloi katve)'
+                  : '4G/5G: KATVE (LoRa aktiivinen)'}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.transportToggleBtn,
+                transportState.usbSerialConnected && styles.transportZeroRfBtn,
+              ]}
+              onPress={toggleUsbZeroRf}
+            >
+              <Text style={styles.transportBtnText}>
+                {transportState.usbSerialConnected
+                  ? 'USB-C 115200: KYTKETTY'
+                  : 'Kytke USB-C (Zero-RF)'}
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* EMCON-radiokurin ohjauspalkki */}
@@ -708,6 +823,68 @@ const styles = StyleSheet.create({
     color: '#C8E6C9',
     fontSize: 13,
     fontWeight: '600',
+  },
+  transportCard: {
+    backgroundColor: '#111A22',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#2196F3',
+  },
+  transportHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  transportTitle: {
+    color: '#90CAF9',
+    fontSize: 13,
+    fontWeight: 'bold',
+  },
+  bleBadge: {
+    backgroundColor: '#1E3A5F',
+    color: '#BBDEFB',
+    fontSize: 10,
+    fontWeight: 'bold',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  bleDisabledBadge: {
+    backgroundColor: '#4A148C',
+    color: '#F3E5F5',
+  },
+  txLogText: {
+    color: '#CFD8DC',
+    fontSize: 11,
+    fontFamily: 'monospace',
+    marginBottom: 8,
+  },
+  transportButtonsRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  transportToggleBtn: {
+    flex: 1,
+    backgroundColor: '#1976D2',
+    paddingVertical: 9,
+    paddingHorizontal: 6,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  transportWarnBtn: {
+    backgroundColor: '#E65100',
+  },
+  transportZeroRfBtn: {
+    backgroundColor: '#6A1B9A',
+  },
+  transportBtnText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: 'bold',
+    textAlign: 'center',
   },
   emconCard: {
     borderRadius: 8,
