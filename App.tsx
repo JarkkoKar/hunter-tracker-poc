@@ -28,6 +28,17 @@ import {
   cancelShotReport,
 } from './src/utils/huntingState';
 import { getTopoTileConfig } from './src/utils/mapTiles';
+import {
+  ActiveProfile,
+  getProfileConfig,
+  formatCoordinatesForProfile,
+} from './src/utils/profileEngine';
+import {
+  RadioTxMode,
+  createInitialEmconState,
+  setRadioTxMode,
+  canTransmitPacket,
+} from './src/utils/emconState';
 
 const { width } = Dimensions.get('window');
 
@@ -74,12 +85,23 @@ const MOCK_OMARIISTA_GEOJSON = {
 };
 
 export default function App() {
+  const [activeProfile, setActiveProfile] = useState<ActiveProfile>(
+    ActiveProfile.HUNTER
+  );
+  const [emconState, setEmconState] = useState(() => createInitialEmconState());
   const [hunterState, setHunterState] = useState(() =>
     createInitialHunterState('Passimies 1')
   );
   const [userLocation, setUserLocation] = useState<Coordinates | null>(null);
   const [gpsStatus, setGpsStatus] = useState<string>('Haetaan GPS-yhteyttä...');
   const [showTopoLayer, setShowTopoLayer] = useState<boolean>(true);
+
+  const profileConfig = useMemo(
+    () => getProfileConfig(activeProfile),
+    [activeProfile]
+  );
+
+  const txAllowed = useMemo(() => canTransmitPacket(emconState), [emconState]);
 
   const tileConfig = useMemo(
     () => getTopoTileConfig(process.env.EXPO_PUBLIC_MML_API_KEY),
@@ -191,14 +213,25 @@ export default function App() {
     setHunterState((prev) => selectStand(prev, stand.id, stand.name));
   };
 
-  const handleReady = () => setHunterState((prev) => setHunterReady(prev));
-  const handleShotFired = () => setHunterState((prev) => reportShotFired(prev));
-  const handleOutcome = (outcome: 'HARVEST' | 'MISS' | 'WOUNDED') =>
+  const handleReady = () => {
+    if (!txAllowed) return;
+    setHunterState((prev) => setHunterReady(prev));
+  };
+
+  const handleShotFired = () => {
+    if (!txAllowed) return;
+    setHunterState((prev) => reportShotFired(prev));
+  };
+
+  const handleOutcome = (outcome: 'HARVEST' | 'MISS' | 'WOUNDED') => {
+    if (!txAllowed) return;
     setHunterState((prev) => resolveShotOutcome(prev, outcome));
+  };
+
   const handleCancelShot = () => setHunterState((prev) => cancelShotReport(prev));
 
   const lastShotLabel = hunterState.lastShot
-    ? `Viimeisin laukaus: ${hunterState.lastShot.outcome} (${new Date(
+    ? `Viimeisin ilmoitus: ${hunterState.lastShot.outcome} (${new Date(
         hunterState.lastShot.timestamp
       ).toLocaleTimeString()})`
     : '';
@@ -208,23 +241,139 @@ export default function App() {
     return Math.round(calculateDistanceMeters(userLocation, selectedStand));
   }, [userLocation, selectedStand]);
 
+  const formattedUserCoords = useMemo(() => {
+    const target = userLocation || selectedStand;
+    if (!target) return 'Ei sijaintia';
+    return formatCoordinatesForProfile(target, activeProfile);
+  }, [userLocation, selectedStand, activeProfile]);
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="light-content" />
       <ScrollView contentContainerStyle={styles.container}>
         <View style={styles.header}>
-          <Text style={styles.appName}>HunterTracker POC</Text>
+          <Text style={[styles.appName, { color: profileConfig.accentColor }]}>
+            HunterTrackerLight // {profileConfig.id}
+          </Text>
           <Text style={styles.subTitle}>
-            {huntingArea.boundary?.name || 'Jahtialue'} | {gpsStatus}
+            {profileConfig.areaLabel}: {huntingArea.boundary?.name || 'Alue 1'} | {gpsStatus}
+          </Text>
+          <Text style={styles.coordDisplay}>
+            [{profileConfig.coordinateSystem}] {formattedUserCoords}
           </Text>
         </View>
 
+        {/* Profiilivalitsin: HUNTER / SAR / TACTICAL */}
+        <View style={styles.profileRow}>
+          {[ActiveProfile.HUNTER, ActiveProfile.SAR, ActiveProfile.TACTICAL].map(
+            (prof) => {
+              const isSelected = activeProfile === prof;
+              const cfg = getProfileConfig(prof);
+              return (
+                <TouchableOpacity
+                  key={prof}
+                  style={[
+                    styles.profileChip,
+                    isSelected && {
+                      backgroundColor: cfg.accentColor,
+                      borderColor: '#FFFFFF',
+                    },
+                  ]}
+                  onPress={() => setActiveProfile(prof)}
+                >
+                  <Text
+                    style={[
+                      styles.profileChipText,
+                      isSelected && { color: '#0A0E0A', fontWeight: 'bold' },
+                    ]}
+                  >
+                    {prof}
+                  </Text>
+                </TouchableOpacity>
+              );
+            }
+          )}
+        </View>
+
+        {/* EMCON-radiokurin ohjauspalkki */}
+        <View
+          style={[
+            styles.emconCard,
+            emconState.mode === RadioTxMode.NORMAL && styles.emconNormal,
+            emconState.mode === RadioTxMode.BURST_MANUAL && styles.emconBurst,
+            emconState.mode === RadioTxMode.RX_ONLY && styles.emconRxOnly,
+          ]}
+        >
+          <View style={styles.emconHeaderRow}>
+            <Text style={styles.emconTitle}>
+              EMCON RADIOKURI: [{emconState.mode}]
+            </Text>
+            <Text style={styles.emconSub}>
+              {emconState.mode === RadioTxMode.RX_ONLY
+                ? 'TX LUKITTU (VAIN KUUNTELU)'
+                : 'LÄHETYS SALLITTU'}
+            </Text>
+          </View>
+
+          <View style={styles.emconButtonsRow}>
+            {emconState.mode !== RadioTxMode.RX_ONLY ? (
+              <>
+                <TouchableOpacity
+                  style={styles.emconBurstBtn}
+                  onPress={() =>
+                    setEmconState((prev) =>
+                      setRadioTxMode(
+                        prev,
+                        prev.mode === RadioTxMode.NORMAL
+                          ? RadioTxMode.BURST_MANUAL
+                          : RadioTxMode.NORMAL,
+                        true
+                      )
+                    )
+                  }
+                >
+                  <Text style={styles.emconBtnText}>
+                    {emconState.mode === RadioTxMode.NORMAL
+                      ? 'Vaihda BURST_MANUAL'
+                      : 'Vaihda NORMAL'}
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.emconSilenceBtn}
+                  onPress={() =>
+                    setEmconState((prev) =>
+                      setRadioTxMode(prev, RadioTxMode.RX_ONLY, true)
+                    )
+                  }
+                >
+                  <Text style={styles.emconBtnText}>ASETA RX_ONLY (HILJAISUUS)</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <TouchableOpacity
+                style={styles.emconUnlockBtn}
+                delayLongPress={2000}
+                onLongPress={() =>
+                  setEmconState((prev) =>
+                    setRadioTxMode(prev, RadioTxMode.NORMAL, true)
+                  )
+                }
+              >
+                <Text style={styles.emconBtnText}>
+                  PAINA 2 SEKUNTIA PALAUTTAAKSESI LÄHETYKSEN (NORMAL)
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+
+        {/* Tilakortti */}
         <View
           style={[
             styles.statusCard,
-            hunterState.status === 'READY' && styles.statusReady,
+            { borderLeftColor: profileConfig.accentColor },
             hunterState.status === 'SHOT_FIRED' && styles.statusShot,
-            hunterState.status === 'HARVEST' && styles.statusHarvest,
             hunterState.status === 'WOUNDED' && styles.statusWounded,
           ]}
         >
@@ -232,7 +381,7 @@ export default function App() {
           <Text style={styles.statusValue}>[{hunterState.status}]</Text>
           {hunterState.standName && (
             <Text style={styles.statusStand}>
-              Passi: {hunterState.standName}
+              {profileConfig.nodeLabel}: {hunterState.standName}
               {distanceToCurrentStand !== null
                 ? ` (etäisyys ${distanceToCurrentStand} m)`
                 : ''}
@@ -243,13 +392,17 @@ export default function App() {
           )}
         </View>
 
+        {/* Karttanäkymä */}
         <View style={styles.mapContainer}>
           <View style={styles.mapHeaderRow}>
-            <Text style={styles.sectionTitle}>
+            <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
               KARTTA: {showTopoLayer ? tileConfig.label.toUpperCase() : 'PERUSKARTTA'}
             </Text>
             <TouchableOpacity
-              style={styles.layerToggleButton}
+              style={[
+                styles.layerToggleButton,
+                { borderColor: profileConfig.accentColor },
+              ]}
               onPress={() => setShowTopoLayer((prev) => !prev)}
             >
               <Text style={styles.layerToggleText}>
@@ -275,7 +428,7 @@ export default function App() {
             {huntingArea.boundary && (
               <Polygon
                 coordinates={huntingArea.boundary.coordinates}
-                strokeColor="#4CAF50"
+                strokeColor={profileConfig.accentColor}
                 fillColor="rgba(76, 175, 80, 0.12)"
                 strokeWidth={2}
               />
@@ -327,27 +480,37 @@ export default function App() {
         </View>
 
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>GPS-AUTOMAATTI / TESTAUS</Text>
+          <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
+            GPS-AUTOMAATTI / TESTAUS
+          </Text>
           <TouchableOpacity
             style={styles.simButton}
             onPress={() => simulateStandArrival(huntingArea.stands[0])}
             activeOpacity={0.7}
           >
             <Text style={styles.simButtonText}>
-              Simuloi: Saavu passiin P1 Kuusikko (&lt; 20 m)
+              Simuloi: Saavu kohteeseen P1 Kuusikko (&lt; 20 m)
             </Text>
           </TouchableOpacity>
         </View>
 
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>1. VALITSE OMA PASSI (MANUAALINEN)</Text>
+          <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
+            1. VALITSE {profileConfig.nodeLabel.toUpperCase()}
+          </Text>
           <View style={styles.standGrid}>
             {huntingArea.stands.map((stand) => {
               const isSelected = stand.id === hunterState.currentStandId;
               return (
                 <TouchableOpacity
                   key={stand.id}
-                  style={[styles.standButton, isSelected && styles.standButtonActive]}
+                  style={[
+                    styles.standButton,
+                    isSelected && {
+                      backgroundColor: '#2E7D32',
+                      borderColor: profileConfig.accentColor,
+                    },
+                  ]}
                   onPress={() => handleSelectStand(stand)}
                   activeOpacity={0.7}
                 >
@@ -367,7 +530,9 @@ export default function App() {
 
         {selectedStand && (
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>2. AMPUMATURVALLISUUS</Text>
+            <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
+              2. SEKTORITURVALLISUUS
+            </Text>
             <View style={styles.safetyBox}>
               <Text style={styles.safetyMain}>
                 Sallittu pääsektori: vihreä 120°
@@ -389,52 +554,78 @@ export default function App() {
         )}
 
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>3. TILANNEKUYITTAUS</Text>
+          <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
+            3. TILANNEKUYITTAUS {!txAllowed ? '(ESTETTY: RX_ONLY)' : ''}
+          </Text>
 
           {hunterState.status === 'IN_STAND' && (
             <TouchableOpacity
-              style={[styles.bigButton, styles.readyButton]}
+              style={[
+                styles.bigButton,
+                txAllowed ? styles.readyButton : styles.disabledButton,
+              ]}
               onPress={handleReady}
+              disabled={!txAllowed}
               activeOpacity={0.7}
             >
-              <Text style={styles.bigButtonText}>[VALMIS PASSIIN]</Text>
+              <Text style={styles.bigButtonText}>
+                {profileConfig.readyActionLabel}
+              </Text>
             </TouchableOpacity>
           )}
 
           {hunterState.status === 'READY' && (
             <TouchableOpacity
-              style={[styles.bigButton, styles.shotButton]}
+              style={[
+                styles.bigButton,
+                txAllowed ? styles.shotButton : styles.disabledButton,
+              ]}
               onPress={handleShotFired}
+              disabled={!txAllowed}
               activeOpacity={0.7}
             >
-              <Text style={styles.bigButtonText}>[LAUKAUS AMMUTTU]</Text>
+              <Text style={styles.bigButtonText}>
+                {profileConfig.alertActionLabel}
+              </Text>
             </TouchableOpacity>
           )}
 
           {hunterState.status === 'SHOT_FIRED' && (
             <View style={styles.outcomeContainer}>
               <TouchableOpacity
-                style={[styles.bigButton, styles.harvestButton]}
+                style={[
+                  styles.bigButton,
+                  txAllowed ? styles.harvestButton : styles.disabledButton,
+                ]}
                 onPress={() => handleOutcome('HARVEST')}
+                disabled={!txAllowed}
                 activeOpacity={0.7}
               >
-                <Text style={styles.bigButtonText}>[KAATO]</Text>
+                <Text style={styles.bigButtonText}>[KAATO / OK]</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.bigButton, styles.missButton]}
+                style={[
+                  styles.bigButton,
+                  txAllowed ? styles.missButton : styles.disabledButton,
+                ]}
                 onPress={() => handleOutcome('MISS')}
+                disabled={!txAllowed}
                 activeOpacity={0.7}
               >
-                <Text style={styles.bigButtonText}>[OHI]</Text>
+                <Text style={styles.bigButtonText}>[OHI / EI HAVAINTOA]</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.bigButton, styles.woundedButton]}
+                style={[
+                  styles.bigButton,
+                  txAllowed ? styles.woundedButton : styles.disabledButton,
+                ]}
                 onPress={() => handleOutcome('WOUNDED')}
+                disabled={!txAllowed}
                 activeOpacity={0.7}
               >
-                <Text style={styles.bigButtonText}>[HAAVAKKO]</Text>
+                <Text style={styles.bigButtonText}>[HAAVAKKO / HÄTÄ]</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
@@ -442,7 +633,7 @@ export default function App() {
                 onPress={handleCancelShot}
                 activeOpacity={0.7}
               >
-                <Text style={styles.cancelButtonText}>Peruuta laukausilmoitus</Text>
+                <Text style={styles.cancelButtonText}>Peruuta ilmoitus</Text>
               </TouchableOpacity>
             </View>
           )}
@@ -450,8 +641,13 @@ export default function App() {
           {(hunterState.status === 'HARVEST' ||
             hunterState.status === 'WOUNDED') && (
             <TouchableOpacity
-              style={[styles.bigButton, styles.readyButton, { marginTop: 12 }]}
+              style={[
+                styles.bigButton,
+                txAllowed ? styles.readyButton : styles.disabledButton,
+                { marginTop: 12 },
+              ]}
               onPress={handleReady}
+              disabled={!txAllowed}
               activeOpacity={0.7}
             >
               <Text style={styles.bigButtonText}>[PALAA VALMIUTEEN]</Text>
@@ -473,21 +669,112 @@ const styles = StyleSheet.create({
     paddingBottom: 40,
   },
   header: {
-    marginBottom: 16,
+    marginBottom: 12,
     borderBottomWidth: 1,
     borderBottomColor: '#1F291F',
     paddingBottom: 8,
   },
   appName: {
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: 'bold',
-    color: '#E0EAE0',
     letterSpacing: 0.5,
   },
   subTitle: {
     fontSize: 13,
-    color: '#81C784',
+    color: '#B0C4B0',
     marginTop: 2,
+  },
+  coordDisplay: {
+    fontSize: 13,
+    fontFamily: 'monospace',
+    color: '#FFF59D',
+    marginTop: 4,
+  },
+  profileRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 14,
+  },
+  profileChip: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 6,
+    backgroundColor: '#161E16',
+    borderWidth: 1,
+    borderColor: '#2E3D2E',
+    alignItems: 'center',
+  },
+  profileChipText: {
+    color: '#C8E6C9',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  emconCard: {
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 14,
+    borderWidth: 1,
+  },
+  emconNormal: {
+    backgroundColor: '#0F2414',
+    borderColor: '#4CAF50',
+  },
+  emconBurst: {
+    backgroundColor: '#2B2108',
+    borderColor: '#FFB300',
+  },
+  emconRxOnly: {
+    backgroundColor: '#2E0B0B',
+    borderColor: '#EF5350',
+  },
+  emconHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  emconTitle: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: 'bold',
+  },
+  emconSub: {
+    color: '#E0E0E0',
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  emconButtonsRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  emconBurstBtn: {
+    flex: 1,
+    backgroundColor: '#8D6E00',
+    paddingVertical: 10,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  emconSilenceBtn: {
+    flex: 1,
+    backgroundColor: '#B71C1C',
+    paddingVertical: 10,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  emconUnlockBtn: {
+    flex: 1,
+    backgroundColor: '#C62828',
+    paddingVertical: 12,
+    borderRadius: 6,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#FFCDD2',
+  },
+  emconBtnText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: 'bold',
+    textAlign: 'center',
   },
   statusCard: {
     backgroundColor: '#161E16',
@@ -495,19 +782,10 @@ const styles = StyleSheet.create({
     padding: 16,
     marginBottom: 16,
     borderLeftWidth: 6,
-    borderLeftColor: '#757575',
-  },
-  statusReady: {
-    borderLeftColor: '#4CAF50',
-    backgroundColor: '#102412',
   },
   statusShot: {
     borderLeftColor: '#FF9800',
     backgroundColor: '#2D1F08',
-  },
-  statusHarvest: {
-    borderLeftColor: '#2E7D32',
-    backgroundColor: '#0F2612',
   },
   statusWounded: {
     borderLeftColor: '#D32F2F',
@@ -554,7 +832,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     borderRadius: 6,
     borderWidth: 1,
-    borderColor: '#4CAF50',
   },
   layerToggleText: {
     color: '#A5D6A7',
@@ -563,7 +840,7 @@ const styles = StyleSheet.create({
   },
   map: {
     width: width - 48,
-    height: 320,
+    height: 300,
     borderRadius: 6,
   },
   section: {
@@ -577,7 +854,6 @@ const styles = StyleSheet.create({
   sectionTitle: {
     fontSize: 13,
     fontWeight: '700',
-    color: '#81C784',
     marginBottom: 8,
     letterSpacing: 0.5,
   },
@@ -602,10 +878,6 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     borderWidth: 1,
     borderColor: '#2D3E2D',
-  },
-  standButtonActive: {
-    backgroundColor: '#2E7D32',
-    borderColor: '#81C784',
   },
   standButtonText: {
     color: '#C0D0C0',
@@ -658,9 +930,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginVertical: 6,
   },
+  disabledButton: {
+    backgroundColor: '#37474F',
+    opacity: 0.55,
+  },
   bigButtonText: {
     color: '#FFFFFF',
-    fontSize: 19,
+    fontSize: 18,
     fontWeight: 'bold',
     letterSpacing: 0.5,
   },
