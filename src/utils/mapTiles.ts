@@ -26,6 +26,50 @@ export interface TopoTileOptions {
   offlineMaxNativeZ?: number;
 }
 
+const OPENTOPOMAP_LAYER: TileLayerConfig = {
+  id: 'opentopomap',
+  urlTemplate: 'https://a.tile.opentopomap.org/{z}/{x}/{y}.png',
+  isMml: false,
+  isOffline: false,
+  label: 'Maastokartta (OpenTopo)',
+  maximumZ: 17,
+};
+
+/**
+ * Käyttäjän valitseman karttatason kerros (#59). Oletus on OpenTopoMap myös
+ * silloin, kun MML-avain on asetettu. `offline` lukee offline-lähteen
+ * (MML avaimen kanssa, muuten OpenTopoMap) tiilet laitteen välimuistista.
+ */
+export function getTileLayerConfig(
+  layer: 'opentopomap' | 'mml-maastokartta' | 'offline',
+  apiKey?: string,
+  options: TopoTileOptions = {}
+): TileLayerConfig {
+  const hasKey = (apiKey || '').trim().length > 0;
+  if (layer === 'offline') {
+    const source = getTileLayerConfig(hasKey ? 'mml-maastokartta' : 'opentopomap', apiKey);
+    if (!options.offlineCacheRootUri) return source;
+    return toOfflineLayer(source, options);
+  }
+  if (layer === 'mml-maastokartta' && hasKey) {
+    return getTopoTileConfig(apiKey);
+  }
+  return { ...OPENTOPOMAP_LAYER };
+}
+
+function toOfflineLayer(online: TileLayerConfig, options: TopoTileOptions): TileLayerConfig {
+  // Offline: sama kerros, mutta luetaan laitteen levyltä. API-avain ei päädy polkuun.
+  return {
+    ...online,
+    urlTemplate: buildLocalTileUrlTemplate(options.offlineCacheRootUri as string, online.id),
+    isOffline: true,
+    label: `${online.label} (offline)`,
+    maximumNativeZ:
+      options.offlineMaxNativeZ ??
+      DEFAULT_OFFLINE_ZOOM_LEVELS[DEFAULT_OFFLINE_ZOOM_LEVELS.length - 1],
+  };
+}
+
 export function getTopoTileConfig(apiKey?: string, options: TopoTileOptions = {}): TileLayerConfig {
   const cleanKey = (apiKey || '').trim();
 
