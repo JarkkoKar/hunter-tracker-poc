@@ -12,6 +12,7 @@ import {
 import MapView, { Polygon, Marker, UrlTile } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { Magnetometer } from 'expo-sensors';
+import * as Haptics from 'expo-haptics';
 import { parseOmaRiistaGeoJSON, Stand } from './src/utils/omariistaParser';
 import {
   calculateDangerZones,
@@ -73,6 +74,9 @@ import {
   generateViewConeCoordinates,
   getCameraHeadingForMode,
   toggleMapOrientationMode,
+  checkHeadingDangerOverlap,
+  shouldTriggerHapticAlert,
+  HeadingDangerResult,
 } from './src/utils/compassHeading';
 
 const { width } = Dimensions.get('window');
@@ -160,6 +164,8 @@ export default function App() {
   const [compassAvailable, setCompassAvailable] = useState<boolean | null>(null);
   const mapRef = useRef<MapView>(null);
   const smoothedHeadingRef = useRef<number | null>(null);
+  const wasHeadingDangerRef = useRef<boolean>(false);
+  const lastHapticAlertAtRef = useRef<number | null>(null);
 
   const profileConfig = useMemo(
     () => getProfileConfig(activeProfile),
@@ -448,6 +454,29 @@ export default function App() {
     if (!origin || compassHeading === null) return [];
     return generateViewConeCoordinates(origin, compassHeading);
   }, [userLocation, selectedStand, compassHeading]);
+
+  // Safety interlock: osuuko katsesuuntakeila naapuripassin kieltokulmaan
+  const headingSafety = useMemo<HeadingDangerResult>(() => {
+    if (compassHeading === null || !selectedStand) return { isDanger: false };
+    return checkHeadingDangerOverlap(compassHeading, dangerZones);
+  }, [compassHeading, selectedStand, dangerZones]);
+
+  // Varinahalytys vain siirtymassa turvallisesta vaaraan, cooldown 2 s
+  useEffect(() => {
+    const nowMs = Date.now();
+    if (
+      shouldTriggerHapticAlert({
+        wasDanger: wasHeadingDangerRef.current,
+        isDanger: headingSafety.isDanger,
+        lastAlertAtMs: lastHapticAlertAtRef.current,
+        nowMs,
+      })
+    ) {
+      lastHapticAlertAtRef.current = nowMs;
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+    }
+    wasHeadingDangerRef.current = headingSafety.isDanger;
+  }, [headingSafety.isDanger]);
 
   const handleSelectStand = (stand: Stand) => {
     setHunterState((prev) => selectStand(prev, stand.id, stand.name));
@@ -800,10 +829,15 @@ export default function App() {
 
             {viewConeCoords.length > 0 && (
               <Polygon
+                key={headingSafety.isDanger ? 'view-cone-danger' : 'view-cone-safe'}
                 coordinates={viewConeCoords}
-                strokeColor="#29B6F6"
-                fillColor="rgba(41, 182, 246, 0.35)"
-                strokeWidth={1}
+                strokeColor={headingSafety.isDanger ? '#D50000' : '#29B6F6'}
+                fillColor={
+                  headingSafety.isDanger
+                    ? 'rgba(213, 0, 0, 0.65)'
+                    : 'rgba(41, 182, 246, 0.35)'
+                }
+                strokeWidth={headingSafety.isDanger ? 2 : 1}
                 zIndex={5}
               />
             )}
@@ -841,6 +875,21 @@ export default function App() {
                   : '---'}
               </Text>
             </TouchableOpacity>
+
+            {headingSafety.isDanger && (
+              <View style={styles.fovWarningBar}>
+                <Text style={styles.fovWarningText}>
+                  {`VAROITUS: T\u00C4HT\u00C4YSSUUNTA KOHTI PASSIA ${
+                    headingSafety.conflictingStandName ?? ''
+                  }`}
+                </Text>
+                <Text style={styles.fovWarningSub}>
+                  {`Poikkeama naapurin suunnasta ${Math.round(
+                    headingSafety.angleDelta ?? 0
+                  )}\u00B0`}
+                </Text>
+              </View>
+            )}
           </View>
         </View>
 
@@ -1368,6 +1417,31 @@ const styles = StyleSheet.create({
     color: '#A5D6A7',
     fontSize: 12,
     fontWeight: '700',
+  },
+  fovWarningBar: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    bottom: 8,
+    backgroundColor: 'rgba(213, 0, 0, 0.92)',
+    borderColor: '#FFFFFF',
+    borderWidth: 2,
+    borderRadius: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    pointerEvents: 'none',
+  },
+  fovWarningText: {
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  fovWarningSub: {
+    color: '#FFEBEE',
+    fontSize: 11,
+    marginTop: 2,
   },
   mapWrapper: {
     position: 'relative',

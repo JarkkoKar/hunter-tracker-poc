@@ -1,4 +1,4 @@
-import { Coordinates, generateSectorPolygonCoordinates } from './safetySector';
+import { Coordinates, DangerZone, generateSectorPolygonCoordinates } from './safetySector';
 
 /**
  * Kartan suuntatila.
@@ -105,4 +105,91 @@ export function toggleMapOrientationMode(mode: MapOrientationMode): MapOrientati
   return mode === MapOrientationMode.NORTH_UP
     ? MapOrientationMode.HEADING_UP
     : MapOrientationMode.NORTH_UP;
+}
+
+// ---------------------------------------------------------------------------
+// Visual & Haptic Safety Interlock
+// ---------------------------------------------------------------------------
+
+/** Värinähälytysten vähimmäisväli (ms), ettei puhelin värise jatkuvasti rajalla. */
+export const HAPTIC_ALERT_COOLDOWN_MS = 2000;
+
+export interface HeadingDangerResult {
+  isDanger: boolean;
+  conflictingStandId?: string;
+  conflictingStandName?: string;
+  /** Kulmaero (0–180°) katsesuunnan ja naapuripassin suunnan (sektorin keskikohdan) välillä. */
+  angleDelta?: number;
+}
+
+/** Lyhin kulmaetäisyys kahden suunnan välillä (0–180°). */
+function angularDistance(a: number, b: number): number {
+  return Math.abs(((a - b + 540) % 360) - 180);
+}
+
+/**
+ * Tarkistaa leikkaako katsesuuntakeila (heading ± coneWidth/2) jonkin
+ * naapuripassin kieltokulman (startAngle–endAngle, myötäpäivään).
+ *
+ * Kaaret ympyrällä leikkaavat, kun niiden keskikohtien lyhin kulmaetäisyys on
+ * enintään puolileveyksien summa. Tämä toimii sellaisenaan pohjoisrajan (0/360) yli.
+ * Reunojen koskettaminen tulkitaan vaaraksi (turvallisempi tulkinta).
+ * Useasta osumasta palautetaan lähin naapuri.
+ */
+export function checkHeadingDangerOverlap(
+  headingDeg: number,
+  dangerZones: DangerZone[],
+  coneWidthDeg: number = DEFAULT_VIEW_CONE_WIDTH_DEG
+): HeadingDangerResult {
+  const heading = normalizeDegrees(headingDeg);
+  const coneHalf = coneWidthDeg / 2;
+  const EPSILON = 1e-9;
+
+  let best: { zone: DangerZone; delta: number } | null = null;
+
+  for (const zone of dangerZones) {
+    const zoneWidth = normalizeDegrees(zone.endAngle - zone.startAngle);
+    const zoneHalf = zoneWidth / 2;
+    const zoneCenter = normalizeDegrees(zone.startAngle + zoneHalf);
+    const delta = angularDistance(heading, zoneCenter);
+
+    if (delta <= coneHalf + zoneHalf + EPSILON) {
+      if (!best || delta < best.delta) {
+        best = { zone, delta };
+      }
+    }
+  }
+
+  if (!best) return { isDanger: false };
+
+  return {
+    isDanger: true,
+    conflictingStandId: best.zone.standId,
+    conflictingStandName: best.zone.standName,
+    angleDelta: best.delta,
+  };
+}
+
+export interface HapticAlertInput {
+  wasDanger: boolean;
+  isDanger: boolean;
+  lastAlertAtMs: number | null;
+  nowMs: number;
+  cooldownMs?: number;
+}
+
+/**
+ * Värinä laukeaa vain siirtymässä turvallisesta vaaraan, ja enintään kerran
+ * cooldown-jakson aikana (estää jatkuvan värinän kompassin heiluessa rajalla).
+ */
+export function shouldTriggerHapticAlert({
+  wasDanger,
+  isDanger,
+  lastAlertAtMs,
+  nowMs,
+  cooldownMs = HAPTIC_ALERT_COOLDOWN_MS,
+}: HapticAlertInput): boolean {
+  if (!isDanger || wasDanger) return false;
+  if (lastAlertAtMs === null) return true;
+  return nowMs - lastAlertAtMs >= cooldownMs;
 }
