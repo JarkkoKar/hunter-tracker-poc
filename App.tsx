@@ -13,6 +13,7 @@ import MapView, { Polygon, Marker, UrlTile } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { Magnetometer } from 'expo-sensors';
 import * as Haptics from 'expo-haptics';
+import { Paths, File, Directory } from 'expo-file-system';
 import { parseOmaRiistaGeoJSON, Stand } from './src/utils/omariistaParser';
 import {
   calculateDangerZones,
@@ -30,6 +31,15 @@ import {
   cancelShotReport,
 } from './src/utils/huntingState';
 import { getTopoTileConfig } from './src/utils/mapTiles';
+import {
+  planOfflineTileDownload,
+  downloadTilesToCache,
+  createTileDownloadState,
+  getDownloadProgressPercent,
+  TileDownloadState,
+  TILE_CACHE_DIR_NAME,
+  getMaxCachedZoomLevel,
+} from './src/utils/offlineTileCache';
 import {
   ActiveProfile,
   getProfileConfig,
@@ -157,6 +167,12 @@ export default function App() {
   const [userLocation, setUserLocation] = useState<Coordinates | null>(null);
   const [gpsStatus, setGpsStatus] = useState<string>('Haetaan GPS-yhteyttä...');
   const [showTopoLayer, setShowTopoLayer] = useState<boolean>(true);
+  const [offlineCacheEnabled, setOfflineCacheEnabled] = useState<boolean>(false);
+  const [tileDownload, setTileDownload] = useState<TileDownloadState | null>(null);
+  const [isDownloadingTiles, setIsDownloadingTiles] = useState<boolean>(false);
+  const [storedTileCount, setStoredTileCount] = useState<number>(0);
+  const [cachedMaxZoom, setCachedMaxZoom] = useState<number | null>(null);
+  const [offlineStatus, setOfflineStatus] = useState<string>('');
   const [orientationMode, setOrientationMode] = useState<MapOrientationMode>(
     MapOrientationMode.NORTH_UP
   );
@@ -174,9 +190,22 @@ export default function App() {
 
   const txAllowed = useMemo(() => canTransmitPacket(emconState), [emconState]);
 
-  const tileConfig = useMemo(
+  // Online-lahde (myos offline-latauksen lahde). Avain tulee vain ymparistomuuttujasta.
+  const onlineTileConfig = useMemo(
     () => getTopoTileConfig(process.env.EXPO_PUBLIC_MML_API_KEY),
     []
+  );
+
+  // Aktiivinen kerros: offline-valimuisti paalla -> UrlTile lukee file://-hakemistoa
+  const tileConfig = useMemo(
+    () =>
+      offlineCacheEnabled
+        ? getTopoTileConfig(process.env.EXPO_PUBLIC_MML_API_KEY, {
+            offlineCacheRootUri: Paths.document.uri,
+            offlineMaxNativeZ: cachedMaxZoom ?? undefined,
+          })
+        : onlineTileConfig,
+    [offlineCacheEnabled, onlineTileConfig, cachedMaxZoom]
   );
 
   const huntingArea = useMemo(
@@ -358,6 +387,113 @@ export default function App() {
         simulatedCoords
       );
     }
+  };
+
+  // Laskee laitteelle tallennetut tiilet (tiles/{layer}/{z}/{x}/{y}.png)
+  const countCachedTiles = (layerId: string): number => {
+    try {
+      const root = new Directory(Paths.document, TILE_CACHE_DIR_NAME, layerId);
+      if (!root.exists) return 0;
+      const walk = (dir: Directory): number =>
+        dir
+          .list()
+          .reduce(
+            (sum, entry) =>
+              sum +
+              (entry instanceof Directory ? walk(entry) : entry.name.endsWith('.png') ? 1 : 0),
+            0
+          );
+      return walk(root);
+    } catch {
+      return 0;
+    }
+  };
+
+  // Suurin ladattu zoom-taso levylta (tiles/{layer}/{z}) -> UrlTile maximumNativeZ
+  const readCachedMaxZoom = (layerId: string): number | null => {
+    try {
+      const root = new Directory(Paths.document, TILE_CACHE_DIR_NAME, layerId);
+      if (!root.exists) return null;
+      return getMaxCachedZoomLevel(
+        root
+          .list()
+          .filter((entry) => entry instanceof Directory)
+          .map((entry) => entry.name)
+      );
+    } catch {
+      return null;
+    }
+  };
+
+  const refreshTileCacheInfo = (layerId: string) => {
+    setStoredTileCount(countCachedTiles(layerId));
+    setCachedMaxZoom(readCachedMaxZoom(layerId));
+  };
+
+  useEffect(() => {
+    refreshTileCacheInfo(onlineTileConfig.id);
+  }, [onlineTileConfig.id]);
+
+  const handleDownloadOfflineTiles = async () => {
+    if (isDownloadingTiles) return;
+    const points =
+      huntingArea.boundary && huntingArea.boundary.coordinates.length > 0
+        ? huntingArea.boundary.coordinates
+        : huntingArea.stands;
+    if (points.length === 0) {
+      setOfflineStatus('Ei jahtialuetta ladattavaksi');
+      return;
+    }
+
+    const plan = planOfflineTileDownload(points);
+    if (plan.tiles.length === 0) {
+      setOfflineStatus('Alue liian suuri: yli 250 tiilt\u00E4 jo zoomilla 13');
+      return;
+    }
+
+    setIsDownloadingTiles(true);
+    setTileDownload(createTileDownloadState(plan.totalTiles));
+    setOfflineStatus('');
+
+    try {
+      const result = await downloadTilesToCache(plan.tiles, {
+        sourceUrlTemplate: onlineTileConfig.urlTemplate,
+        rootUri: Paths.document.uri,
+        layerId: onlineTileConfig.id,
+        concurrency: 4,
+        downloadTile: async (url, destinationUri) => {
+          const target = new File(destinationUri);
+          if (target.exists && target.size > 0) return; // jo valimuistissa
+          target.parentDirectory.create({ intermediates: true, idempotent: true });
+          await File.downloadFileAsync(url, target, {
+            idempotent: true,
+            headers: { 'User-Agent': 'HunterTrackerPOC/1.0 (offline tile cache)' },
+          });
+        },
+        onProgress: setTileDownload,
+      });
+
+      const skipped = plan.skippedZoomLevels.length
+        ? ` | z${plan.skippedZoomLevels.join(',')} ohitettu (raja 250)`
+        : '';
+      const failed = result.failed ? ` | ${result.failed} ep\u00E4onnistui` : '';
+      setOfflineStatus(
+        `Ladattu ${result.completed}/${result.total} (z${plan.zoomLevels.join(',')})${skipped}${failed}`
+      );
+    } catch {
+      setOfflineStatus('Lataus keskeytyi virheeseen');
+    } finally {
+      setIsDownloadingTiles(false);
+      refreshTileCacheInfo(onlineTileConfig.id);
+    }
+  };
+
+  const handleToggleOfflineCache = () => {
+    setOfflineCacheEnabled((prev) => {
+      const next = !prev;
+      if (next) setShowTopoLayer(true);
+      return next;
+    });
   };
 
   const handleSendTrackDelta = () => {
@@ -750,6 +886,52 @@ export default function App() {
             </TouchableOpacity>
           </View>
 
+          {/* Offline-karttavalimuisti */}
+          <View style={styles.offlineRow}>
+            <TouchableOpacity
+              style={[
+                styles.offlineDownloadButton,
+                isDownloadingTiles && styles.offlineButtonBusy,
+              ]}
+              onPress={handleDownloadOfflineTiles}
+              disabled={isDownloadingTiles}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.offlineButtonText}>
+                {isDownloadingTiles && tileDownload
+                  ? `Ladataan... ${getDownloadProgressPercent(tileDownload)} % (${
+                      tileDownload.completed + tileDownload.failed
+                    }/${tileDownload.total})`
+                  : 'Lataa kartta offline-tilaan'}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.offlineToggleButton,
+                offlineCacheEnabled && {
+                  backgroundColor: '#1B5E20',
+                  borderColor: profileConfig.accentColor,
+                },
+              ]}
+              onPress={handleToggleOfflineCache}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.offlineButtonText}>
+                {offlineCacheEnabled
+                  ? 'Offline-v\u00E4limuisti: P\u00C4\u00C4LL\u00C4'
+                  : 'Offline-v\u00E4limuisti: POIS'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+          <Text style={styles.offlineStatusText}>
+            {`Tallennettu: ${storedTileCount} tiilt\u00E4 (${onlineTileConfig.id})`}
+            {offlineStatus ? ` | ${offlineStatus}` : ''}
+            {offlineCacheEnabled && storedTileCount === 0
+              ? ' | Ei tallennettuja tiili\u00E4 - lataa ensin'
+              : ''}
+          </Text>
+
           <View style={styles.mapWrapper}>
           <MapView
             ref={mapRef}
@@ -759,8 +941,10 @@ export default function App() {
           >
             {showTopoLayer && (
               <UrlTile
+                key={tileConfig.isOffline ? 'tiles-offline' : 'tiles-online'}
                 urlTemplate={tileConfig.urlTemplate}
                 maximumZ={tileConfig.maximumZ}
+                maximumNativeZ={tileConfig.maximumNativeZ}
                 flipY={false}
                 zIndex={-1}
               />
@@ -1417,6 +1601,46 @@ const styles = StyleSheet.create({
     color: '#A5D6A7',
     fontSize: 12,
     fontWeight: '700',
+  },
+  offlineRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 6,
+  },
+  offlineDownloadButton: {
+    flex: 1,
+    backgroundColor: '#1565C0',
+    paddingVertical: 9,
+    paddingHorizontal: 6,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  offlineButtonBusy: {
+    backgroundColor: '#37474F',
+  },
+  offlineToggleButton: {
+    flex: 1,
+    backgroundColor: '#1E2E1E',
+    paddingVertical: 9,
+    paddingHorizontal: 6,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#4F5F4F',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  offlineButtonText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  offlineStatusText: {
+    color: '#B0C4B0',
+    fontSize: 11,
+    fontFamily: 'monospace',
+    marginBottom: 8,
   },
   fovWarningBar: {
     position: 'absolute',
