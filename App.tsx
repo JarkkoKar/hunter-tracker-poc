@@ -14,7 +14,15 @@ import * as Location from 'expo-location';
 import { Magnetometer } from 'expo-sensors';
 import * as Haptics from 'expo-haptics';
 import { Paths, File, Directory } from 'expo-file-system';
-import { parseOmaRiistaGeoJSON, Stand } from './src/utils/omariistaParser';
+import * as DocumentPicker from 'expo-document-picker';
+import {
+  Stand,
+  HuntingArea,
+  getDefaultTestArea,
+  importOmaRiistaFromJsonString,
+  calculateAreaCenter,
+  isSupportedGeoJsonFileName,
+} from './src/utils/omariistaParser';
 import {
   calculateDangerZones,
   generateSectorPolygonCoordinates,
@@ -91,48 +99,6 @@ import {
 
 const { width } = Dimensions.get('window');
 
-const MOCK_OMARIISTA_GEOJSON = {
-  type: 'FeatureCollection',
-  features: [
-    {
-      type: 'Feature',
-      geometry: {
-        type: 'Polygon',
-        coordinates: [
-          [
-            [24.0, 61.0],
-            [24.1, 61.0],
-            [24.1, 61.1],
-            [24.0, 61.1],
-            [24.0, 61.0],
-          ],
-        ],
-      },
-      properties: { name: 'Hirvilohko 1 (Pohjoinen)' },
-    },
-    {
-      type: 'Feature',
-      geometry: { type: 'Point', coordinates: [24.05, 61.05] },
-      properties: { id: 'p1', name: 'P1 Kuusikko' },
-    },
-    {
-      type: 'Feature',
-      geometry: { type: 'Point', coordinates: [24.05, 61.06] },
-      properties: { id: 'p2', name: 'P2 Kallio (Pohjoinen)' },
-    },
-    {
-      type: 'Feature',
-      geometry: { type: 'Point', coordinates: [24.07, 61.05] },
-      properties: { id: 'p3', name: 'P3 Tiehaara (Itä)' },
-    },
-    {
-      type: 'Feature',
-      geometry: { type: 'Point', coordinates: [24.03, 61.05] },
-      properties: { id: 'p4', name: 'P4 Oja (Länsi)' },
-    },
-  ],
-};
-
 const SAMPLE_SAR_SECTOR_VERTICES: Coordinates[] = [
   { latitude: 61.052, longitude: 24.042 },
   { latitude: 61.058, longitude: 24.042 },
@@ -208,10 +174,10 @@ export default function App() {
     [offlineCacheEnabled, onlineTileConfig, cachedMaxZoom]
   );
 
-  const huntingArea = useMemo(
-    () => parseOmaRiistaGeoJSON(MOCK_OMARIISTA_GEOJSON),
-    []
-  );
+  // Jahtialue: oletuksena testialue, vaihdettavissa OmaRiista GeoJSON -tuonnilla
+  const [huntingArea, setHuntingArea] = useState<HuntingArea>(() => getDefaultTestArea());
+  const [areaImportStatus, setAreaImportStatus] = useState<string>('');
+  const [isImportingArea, setIsImportingArea] = useState<boolean>(false);
 
   const selectedStand = useMemo(
     () => huntingArea.stands.find((s) => s.id === hunterState.currentStandId),
@@ -495,6 +461,64 @@ export default function App() {
       return next;
     });
   };
+
+  // Vaihtaa jahtialueen: passit paivittyvat, ensimmainen passi valitaan, kamera keskittyy
+  const applyHuntingArea = (area: HuntingArea, statusText: string) => {
+    setHuntingArea(area);
+    const firstStand = area.stands[0];
+    setHunterState((prev) =>
+      firstStand
+        ? selectStand(prev, firstStand.id, firstStand.name)
+        : createInitialHunterState(prev.hunterName)
+    );
+    setAreaImportStatus(statusText);
+    const region = calculateAreaCenter(area);
+    if (region) mapRef.current?.animateToRegion(region, 800);
+  };
+
+  const handleImportOmaRiista = async () => {
+    if (isImportingArea) return;
+    setIsImportingArea(true);
+    try {
+      // '*/*': Android ei tunnista .geojson-MIME-tyyppia luotettavasti -> tarkistetaan paate itse
+      const picked = await DocumentPicker.getDocumentAsync({
+        type: '*/*',
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (picked.canceled || !picked.assets || picked.assets.length === 0) {
+        setAreaImportStatus('Tuonti peruttu');
+        return;
+      }
+
+      const asset = picked.assets[0];
+      if (!isSupportedGeoJsonFileName(asset.name)) {
+        setAreaImportStatus(`VIRHE: ${asset.name} ei ole .geojson- tai .json-tiedosto`);
+        return;
+      }
+
+      const text = await new File(asset.uri).text();
+      const result = importOmaRiistaFromJsonString(text);
+      if (!result.ok) {
+        setAreaImportStatus(`VIRHE: ${result.error}`);
+        return;
+      }
+
+      const warnings = result.warnings.length ? ` | ${result.warnings.join(' ')}` : '';
+      applyHuntingArea(
+        result.area,
+        `Tuotu: ${asset.name} (${result.area.stands.length} passia)${warnings}`
+      );
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      setAreaImportStatus(`VIRHE: tiedoston luku ep\u00E4onnistui (${detail})`);
+    } finally {
+      setIsImportingArea(false);
+    }
+  };
+
+  const handleRestoreTestArea = () =>
+    applyHuntingArea(getDefaultTestArea(), 'Testialue palautettu (Hirvilohko 1)');
 
   const handleSendTrackDelta = () => {
     const base = userLocation || selectedStand || { latitude: 61.05, longitude: 24.05 };
@@ -1128,6 +1152,44 @@ export default function App() {
           </TouchableOpacity>
         </View>
 
+        {/* Jahtialueen hallinta: OmaRiista GeoJSON -tuonti */}
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
+            JAHTIALUE: {huntingArea.boundary?.name || 'Ei aluerajaa'} (
+            {huntingArea.stands.length} passia)
+          </Text>
+          <View style={styles.areaButtonsRow}>
+            <TouchableOpacity
+              style={[styles.areaImportButton, isImportingArea && styles.offlineButtonBusy]}
+              onPress={handleImportOmaRiista}
+              disabled={isImportingArea}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.offlineButtonText}>
+                {isImportingArea ? 'Luetaan tiedostoa...' : 'Tuo OmaRiista GeoJSON'}
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.offlineToggleButton}
+              onPress={handleRestoreTestArea}
+              disabled={isImportingArea}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.offlineButtonText}>Palauta testialue</Text>
+            </TouchableOpacity>
+          </View>
+          {areaImportStatus.length > 0 && (
+            <Text
+              style={[
+                styles.offlineStatusText,
+                areaImportStatus.startsWith('VIRHE') && styles.areaImportError,
+              ]}
+            >
+              {areaImportStatus}
+            </Text>
+          )}
+        </View>
+
         <View style={styles.section}>
           <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
             1. VALITSE {profileConfig.nodeLabel.toUpperCase()}
@@ -1601,6 +1663,24 @@ const styles = StyleSheet.create({
     color: '#A5D6A7',
     fontSize: 12,
     fontWeight: '700',
+  },
+  areaButtonsRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 6,
+  },
+  areaImportButton: {
+    flex: 1,
+    backgroundColor: '#2E7D32',
+    paddingVertical: 11,
+    paddingHorizontal: 6,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  areaImportError: {
+    color: '#FF8A80',
+    fontWeight: 'bold',
   },
   offlineRow: {
     flexDirection: 'row',
