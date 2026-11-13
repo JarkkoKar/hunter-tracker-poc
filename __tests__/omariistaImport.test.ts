@@ -7,6 +7,7 @@ import {
   isSupportedGeoJsonFileName,
   MAX_IMPORT_TEXT_LENGTH,
   HuntingArea,
+  readImportFileText,
 } from '../src/utils/omariistaParser';
 
 const VALID_GEOJSON = {
@@ -214,6 +215,113 @@ describe('Oletustestialue (Hirvilohko 1)', () => {
     const region = calculateAreaCenter(getDefaultTestArea())!;
     expect(region.latitude).toBeCloseTo(61.05, 6);
     expect(region.longitude).toBeCloseTo(24.05, 6);
+  });
+});
+
+describe('readImportFileText: file:// ja content:// (Android Document Picker)', () => {
+  const GEOJSON_TEXT = JSON.stringify(VALID_GEOJSON);
+  const FILE_URI = 'file:///data/user/0/host.exp.exponent/cache/DocumentPicker/abc/lohko.geojson';
+  const CONTENT_URI = 'content://com.android.providers.downloads.documents/document/msf%3A1234';
+
+  const makeReaders = (primary: (uri: string) => Promise<string>, fallback?: (uri: string) => Promise<string>) => {
+    const calls = { primary: [] as string[], fallback: [] as string[] };
+    return {
+      calls,
+      readers: {
+        readAsString: async (uri: string) => {
+          calls.primary.push(uri);
+          return primary(uri);
+        },
+        fetchText: fallback
+          ? async (uri: string) => {
+              calls.fallback.push(uri);
+              return fallback(uri);
+            }
+          : undefined,
+      },
+    };
+  };
+
+  it('lukee file://-osoitteen ensisijaisella lukijalla', async () => {
+    const { readers, calls } = makeReaders(async () => GEOJSON_TEXT, async () => 'ei käytetä');
+    const r = await readImportFileText(FILE_URI, readers);
+    expect(r).toEqual({ ok: true, text: GEOJSON_TEXT, source: 'primary' });
+    expect(calls.primary).toEqual([FILE_URI]);
+    expect(calls.fallback).toEqual([]);
+  });
+
+  it('lukee content://-osoitteen ensisijaisella lukijalla', async () => {
+    const { readers, calls } = makeReaders(async () => GEOJSON_TEXT);
+    const r = await readImportFileText(CONTENT_URI, readers);
+    expect(r.ok).toBe(true);
+    expect(calls.primary).toEqual([CONTENT_URI]);
+  });
+
+  it('jos ensisijainen hylätään (Android content://), käytetään fetch-varalukijaa', async () => {
+    const { readers, calls } = makeReaders(
+      async () => {
+        throw new Error('Call to function FileSystemFile.text has been rejected');
+      },
+      async () => GEOJSON_TEXT
+    );
+    const r = await readImportFileText(CONTENT_URI, readers);
+    expect(r).toEqual({ ok: true, text: GEOJSON_TEXT, source: 'fallback' });
+    expect(calls.fallback).toEqual([CONTENT_URI]);
+  });
+
+  it('molempien lukijoiden epäonnistuessa palautetaan selkeä virhe (ei heitä)', async () => {
+    const { readers } = makeReaders(
+      async () => {
+        throw new Error('Call to function FileSystemFile.text has been rejected');
+      },
+      async () => {
+        throw new Error('Network request failed');
+      }
+    );
+    const r = await readImportFileText(CONTENT_URI, readers);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toMatch(/luku epäonnistui/i);
+      expect(r.error).toContain('FileSystemFile.text has been rejected');
+      expect(r.error).toContain('Network request failed');
+    }
+  });
+
+  it('ilman varalukijaa ensisijaisen virhe palautetaan hallitusti', async () => {
+    const { readers } = makeReaders(async () => {
+      throw new Error('permission denied');
+    });
+    const r = await readImportFileText(FILE_URI, readers);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain('permission denied');
+  });
+
+  it('tyhjä tiedosto (myös pelkkä BOM tai välilyönnit) antaa selkeän virheen', async () => {
+    for (const empty of ['', '   \n', '﻿']) {
+      const { readers } = makeReaders(async () => empty);
+      const r = await readImportFileText(FILE_URI, readers);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toMatch(/tyhjä/i);
+    }
+  });
+
+  it('puuttuva tai tukematon osoite hylätään ennen lukemista', async () => {
+    const { readers, calls } = makeReaders(async () => GEOJSON_TEXT);
+    const missing = await readImportFileText('', readers);
+    expect(missing.ok).toBe(false);
+    const http = await readImportFileText('https://example.com/lohko.geojson', readers);
+    expect(http.ok).toBe(false);
+    if (!http.ok) expect(http.error).toMatch(/file:\/\/.*content:\/\//);
+    expect(calls.primary).toEqual([]);
+  });
+
+  it('luettu teksti kulkee suoraan tuontiin (päästä päähän)', async () => {
+    const { readers } = makeReaders(async () => `﻿${GEOJSON_TEXT}`);
+    const read = await readImportFileText(CONTENT_URI, readers);
+    expect(read.ok).toBe(true);
+    if (!read.ok) return;
+    const imported = importOmaRiistaFromJsonString(read.text);
+    expect(imported.ok).toBe(true);
   });
 });
 

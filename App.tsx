@@ -15,6 +15,7 @@ import { Magnetometer } from 'expo-sensors';
 import * as Haptics from 'expo-haptics';
 import { Paths, File, Directory } from 'expo-file-system';
 import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 import {
   Stand,
   HuntingArea,
@@ -22,6 +23,7 @@ import {
   importOmaRiistaFromJsonString,
   calculateAreaCenter,
   isSupportedGeoJsonFileName,
+  readImportFileText,
 } from './src/utils/omariistaParser';
 import {
   calculateDangerZones,
@@ -480,9 +482,10 @@ export default function App() {
     if (isImportingArea) return;
     setIsImportingArea(true);
     try {
-      // '*/*': Android ei tunnista .geojson-MIME-tyyppia luotettavasti -> tarkistetaan paate itse
+      // '*/*' mukana: Android ei tunnista .geojson-MIME-tyyppia luotettavasti -> paate tarkistetaan itse.
+      // copyToCacheDirectory: Android kopioi tiedoston paikalliseen file://-valimuistiin.
       const picked = await DocumentPicker.getDocumentAsync({
-        type: '*/*',
+        type: ['application/json', 'application/geo+json', '*/*'],
         copyToCacheDirectory: true,
         multiple: false,
       });
@@ -497,8 +500,19 @@ export default function App() {
         return;
       }
 
-      const text = await new File(asset.uri).text();
-      const result = importOmaRiistaFromJsonString(text);
+      // File.text() hylataan Androidin content://-osoitteilla -> legacy readAsStringAsync,
+      // varalla fetch(). Lukija tukee seka file:// etta content:// -osoitteita.
+      const read = await readImportFileText(asset.uri, {
+        readAsString: (uri) =>
+          FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.UTF8 }),
+        fetchText: async (uri) => (await fetch(uri)).text(),
+      });
+      if (!read.ok) {
+        setAreaImportStatus(`VIRHE: ${read.error}`);
+        return;
+      }
+
+      const result = importOmaRiistaFromJsonString(read.text);
       if (!result.ok) {
         setAreaImportStatus(`VIRHE: ${result.error}`);
         return;

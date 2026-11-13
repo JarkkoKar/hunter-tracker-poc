@@ -204,6 +204,68 @@ export function importOmaRiistaFromJsonString(text: string): OmaRiistaImportResu
   return { ok: true, area, warnings };
 }
 
+export interface ImportFileReaders {
+  /** Ensisijainen lukija, esim. expo-file-system/legacy `readAsStringAsync` (tukee file:// ja content://). */
+  readAsString: (uri: string) => Promise<string>;
+  /** Varalukija, esim. `fetch(uri).then(r => r.text())`. */
+  fetchText?: (uri: string) => Promise<string>;
+}
+
+export type ImportFileReadResult =
+  | { ok: true; text: string; source: 'primary' | 'fallback' }
+  | { ok: false; error: string };
+
+const errorMessage = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/**
+ * Lukee Document Pickerin palauttaman tiedoston tekstinä. Tukee sekä file://-
+ * (copyToCacheDirectory) että Androidin content://-osoitteita. Yrittää ensin
+ * ensisijaista lukijaa ja sen hylätessä varalukijaa. Ei koskaan heitä.
+ */
+export async function readImportFileText(
+  uri: string,
+  readers: ImportFileReaders
+): Promise<ImportFileReadResult> {
+  if (!uri || typeof uri !== 'string') {
+    return { ok: false, error: 'Tiedoston osoite puuttuu.' };
+  }
+  if (!/^(file|content):\/\//i.test(uri)) {
+    return {
+      ok: false,
+      error: 'Tukematon tiedosto-osoite: vain file:// ja content:// -osoitteet voidaan lukea.',
+    };
+  }
+
+  const isEmpty = (text: string) => text.replace(/^﻿/, '').trim().length === 0;
+  const emptyError = { ok: false as const, error: 'Valittu tiedosto on tyhjä.' };
+
+  let primaryError: string;
+  try {
+    const text = await readers.readAsString(uri);
+    if (typeof text === 'string') {
+      return isEmpty(text) ? emptyError : { ok: true, text, source: 'primary' };
+    }
+    primaryError = 'ensisijainen lukija ei palauttanut tekstiä';
+  } catch (e) {
+    primaryError = errorMessage(e);
+  }
+
+  if (!readers.fetchText) {
+    return { ok: false, error: `Tiedoston luku epäonnistui: ${primaryError}` };
+  }
+
+  try {
+    const text = await readers.fetchText(uri);
+    if (typeof text !== 'string') throw new Error('varalukija ei palauttanut tekstiä');
+    return isEmpty(text) ? emptyError : { ok: true, text, source: 'fallback' };
+  } catch (e) {
+    return {
+      ok: false,
+      error: `Tiedoston luku epäonnistui: ${primaryError} (varalukija: ${errorMessage(e)})`,
+    };
+  }
+}
+
 /**
  * Kartan näkymä uuden alueen päälle: rajauksen (aluerajan kärkipisteet + passit)
  * keskipiste ja marginaalilla laajennetut deltat (`animateToRegion`-muodossa).
