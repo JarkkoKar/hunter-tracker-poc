@@ -24,6 +24,8 @@ import {
   calculateAreaCenter,
   isSupportedGeoJsonFileName,
   readImportFileText,
+  getAreaPolygons,
+  getAreaPoints,
 } from './src/utils/omariistaParser';
 import {
   calculateDangerZones,
@@ -180,6 +182,7 @@ export default function App() {
   const [huntingArea, setHuntingArea] = useState<HuntingArea>(() => getDefaultTestArea());
   const [areaImportStatus, setAreaImportStatus] = useState<string>('');
   const [isImportingArea, setIsImportingArea] = useState<boolean>(false);
+  const areaPolygons = useMemo(() => getAreaPolygons(huntingArea), [huntingArea]);
 
   const selectedStand = useMemo(
     () => huntingArea.stands.find((s) => s.id === hunterState.currentStandId),
@@ -404,10 +407,7 @@ export default function App() {
 
   const handleDownloadOfflineTiles = async () => {
     if (isDownloadingTiles) return;
-    const points =
-      huntingArea.boundary && huntingArea.boundary.coordinates.length > 0
-        ? huntingArea.boundary.coordinates
-        : huntingArea.stands;
+    const points = getAreaPoints(huntingArea); // kaikki palstat + passit
     if (points.length === 0) {
       setOfflineStatus('Ei jahtialuetta ladattavaksi');
       return;
@@ -521,7 +521,9 @@ export default function App() {
       const warnings = result.warnings.length ? ` | ${result.warnings.join(' ')}` : '';
       applyHuntingArea(
         result.area,
-        `Tuotu: ${asset.name} (${result.area.stands.length} passia)${warnings}`
+        `Tuotu: ${asset.name} (${getAreaPolygons(result.area).length} palstaa, ${
+          result.area.stands.length
+        } passia)${warnings}`
       );
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
@@ -988,14 +990,16 @@ export default function App() {
               />
             )}
 
-            {huntingArea.boundary && (
+            {/* Kaikki jahtialueen palstat (OmaRiista MultiPolygon) */}
+            {areaPolygons.map((parcel, index) => (
               <Polygon
-                coordinates={huntingArea.boundary.coordinates}
+                key={`parcel-${index}`}
+                coordinates={parcel.coordinates}
                 strokeColor={profileConfig.accentColor}
                 fillColor="rgba(76, 175, 80, 0.12)"
                 strokeWidth={2}
               />
-            )}
+            ))}
 
             {showSarSector && (
               <Polygon
