@@ -92,6 +92,11 @@ import {
   routeOutgoingPacket,
 } from './src/utils/transportManager';
 import {
+  NativeUsbSerialModule,
+  connectLoraSerial,
+} from './src/utils/androidUsbOtgDriver';
+import { ISerialPortDriver } from './src/utils/serialPortDriver';
+import {
   PacketType,
   encodeEncryptedFrame,
 } from './src/utils/wireProtocol';
@@ -124,6 +129,11 @@ import {
 
 const { width } = Dimensions.get('window');
 
+// Natiivi USB-OTG-sarjaporttikirjasto (#25). null = ei asennettu / Expo Go ->
+// hallittu pudotus LOOPBACK-SIM-tilaan. Kun react-native-usb-serialport-for-android
+// asennetaan Dev Buildiin, tähän kytketään createUsbSerialportAdapter(UsbSerialManager).
+const NATIVE_USB_SERIAL_MODULE: NativeUsbSerialModule | null = null;
+
 const SAMPLE_SAR_SECTOR_VERTICES: Coordinates[] = [
   { latitude: 61.012, longitude: 24.527 },
   { latitude: 61.018, longitude: 24.527 },
@@ -148,6 +158,8 @@ export default function App() {
     'Valmis lähetykseen (E2EE + 4G/5G -> LoRa)'
   );
   const [lastCotPreview, setLastCotPreview] = useState<string>('');
+  const [loraDriverLabel, setLoraDriverLabel] = useState<string>('');
+  const loraDriverRef = useRef<ISerialPortDriver | null>(null);
   const [showSarSector, setShowSarSector] = useState<boolean>(false);
   const [sosLockedLocation, setSosLockedLocation] = useState<Coordinates | null>(
     null
@@ -670,12 +682,40 @@ export default function App() {
     );
   };
 
-  const toggleUsbZeroRf = () => {
+  // Suljetaan USB-OTG-ajuri, kun sovellus sulkeutuu.
+  useEffect(() => {
+    return () => {
+      loraDriverRef.current?.close();
+      loraDriverRef.current = null;
+    };
+  }, []);
+
+  const toggleUsbZeroRf = async () => {
     if (!transportState.usbSerialConnected) {
+      const lora = await connectLoraSerial(
+        NATIVE_USB_SERIAL_MODULE,
+        NATIVE_USB_SERIAL_MODULE ? 'native' : 'simulation'
+      );
+      loraDriverRef.current = lora.driver;
+      setLoraDriverLabel(lora.label);
+      // Kaapelin irrotus kesken ajon -> palataan hallitusti 4G/LoRa Meshiin.
+      lora.driver.onStatusChange((status) => {
+        if (status !== 'DISCONNECTED' || loraDriverRef.current !== lora.driver) return;
+        loraDriverRef.current = null;
+        setLoraDriverLabel('');
+        setTransportState((prev) => disconnectUsbSerial(prev));
+        setLastTxLog('USB-C kaapeli irrotettu | Radion 2.4 GHz BLE palautettu');
+      });
       const { state, adminCommand } = connectUsbSerial(transportState, 115200);
       setTransportState(state);
-      setLastTxLog(`USB-C (115200 bps) kytketty | Lähetetty: ${adminCommand}`);
+      setLastTxLog(
+        `USB-C (115200 bps) kytketty [${lora.label}] | Lähetetty: ${adminCommand}`
+      );
     } else {
+      const driver = loraDriverRef.current;
+      loraDriverRef.current = null;
+      setLoraDriverLabel('');
+      await driver?.close();
       const state = disconnectUsbSerial(transportState);
       setTransportState(state);
       setLastTxLog('USB-C irrotettu | Radion 2.4 GHz BLE palautettu');
@@ -936,6 +976,9 @@ export default function App() {
           </View>
 
           <Text style={styles.txLogText}>{lastTxLog}</Text>
+          {transportState.usbSerialConnected && loraDriverLabel.length > 0 && (
+            <Text style={styles.txLogText}>LoRa-radio: {loraDriverLabel}</Text>
+          )}
           {lastCotPreview.length > 0 && (
             <Text style={styles.cotLogText}>{lastCotPreview}</Text>
           )}
