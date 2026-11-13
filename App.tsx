@@ -13,6 +13,17 @@ import MapView, { Polygon, Marker, UrlTile } from 'react-native-maps';
 import * as Location from 'expo-location';
 import { Magnetometer } from 'expo-sensors';
 import * as Haptics from 'expo-haptics';
+import { createAudioPlayer, setAudioModeAsync, AudioPlayer } from 'expo-audio';
+import {
+  AudioWarningLevel,
+  AUDIO_WARNING_TONES,
+  createAudioInterlockState,
+  setAudioWarningEnabled,
+  shouldPlayAudioWarning,
+  generateToneWav,
+  bytesToBase64,
+  buildToneFileName,
+} from './src/utils/audioInterlock';
 import { Paths, File, Directory } from 'expo-file-system';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -721,6 +732,89 @@ export default function App() {
     wasHeadingDangerRef.current = headingSafety.isDanger;
   }, [headingSafety.isDanger]);
 
+  // Silent Hunt Audio Interlock: merkkiaani Bluetooth-kuulosuojaimiin
+  const [audioWarningEnabled, setAudioWarningEnabledState] = useState<boolean>(true);
+  const [audioStatus, setAudioStatus] = useState<string>('\u00C4\u00E4nivaroitus: alustetaan...');
+  const audioInterlockRef = useRef(createAudioInterlockState());
+  const audioPlayersRef = useRef<Partial<Record<AudioWarningLevel, AudioPlayer>>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    const created: AudioPlayer[] = [];
+    (async () => {
+      try {
+        // Media-aani reitittyy kytkettyihin BT-kuulosuojaimiin; muut aanet vaimenevat hetkeksi
+        await setAudioModeAsync({
+          playsInSilentMode: true,
+          interruptionMode: 'duckOthers',
+          allowsRecording: false,
+          shouldPlayInBackground: false,
+          shouldRouteThroughEarpiece: false,
+        });
+        const dir = FileSystem.cacheDirectory;
+        if (!dir) throw new Error('cacheDirectory puuttuu');
+        for (const level of Object.values(AudioWarningLevel)) {
+          // Merkkiaani generoidaan koodissa ja kirjoitetaan valimuistiin kerran
+          const uri = `${dir}${buildToneFileName(level)}`;
+          const info = await FileSystem.getInfoAsync(uri);
+          if (!info.exists) {
+            await FileSystem.writeAsStringAsync(
+              uri,
+              bytesToBase64(generateToneWav(AUDIO_WARNING_TONES[level])),
+              { encoding: FileSystem.EncodingType.Base64 }
+            );
+          }
+          if (cancelled) return;
+          const player = createAudioPlayer({ uri });
+          created.push(player);
+          audioPlayersRef.current[level] = player;
+        }
+        if (!cancelled) setAudioStatus('\u00C4\u00E4nivaroitus valmis (BT-kuulosuojaimet / kaiutin)');
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : String(e);
+        if (!cancelled) setAudioStatus(`VIRHE: \u00E4\u00E4nivaroitus ei k\u00E4ytett\u00E4viss\u00E4 (${detail})`);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      created.forEach((p) => p.remove());
+      audioPlayersRef.current = {};
+    };
+  }, []);
+
+  const playWarningTone = (level: AudioWarningLevel) => {
+    const player = audioPlayersRef.current[level];
+    if (!player) return;
+    player
+      .seekTo(0)
+      .catch(() => {})
+      .finally(() => player.play());
+  };
+
+  // Paatos heti tilan muuttuessa + 500 ms valein vaarassa (muistutus 10 s valein).
+  // EMCON RX_ONLY ei esta: paikallinen turvatoiminto ilman RF-lahetysta.
+  useEffect(() => {
+    const evaluate = () => {
+      const decision = shouldPlayAudioWarning(audioInterlockRef.current, {
+        isDanger: headingSafety.isDanger,
+        nowMs: Date.now(),
+        radioMode: emconState.mode,
+      });
+      audioInterlockRef.current = decision.state;
+      if (decision.play && decision.level) playWarningTone(decision.level);
+    };
+    evaluate();
+    if (!headingSafety.isDanger || !audioWarningEnabled) return;
+    const timer = setInterval(evaluate, 500);
+    return () => clearInterval(timer);
+  }, [headingSafety.isDanger, audioWarningEnabled, emconState.mode]);
+
+  const handleToggleAudioWarning = () => {
+    const next = !audioWarningEnabled;
+    audioInterlockRef.current = setAudioWarningEnabled(audioInterlockRef.current, next);
+    setAudioWarningEnabledState(next);
+  };
+
   const handleSelectStand = (stand: Stand) => {
     setHunterState((prev) => selectStand(prev, stand.id, stand.name));
     dispatchEncryptedTelemetry(PacketType.POSITION, 0x11, `VALINTA ${stand.id}`);
@@ -1318,6 +1412,33 @@ export default function App() {
             <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
               2. SEKTORITURVALLISUUS
             </Text>
+            <View style={styles.areaButtonsRow}>
+              <TouchableOpacity
+                style={[
+                  styles.offlineToggleButton,
+                  audioWarningEnabled && {
+                    backgroundColor: '#1B5E20',
+                    borderColor: profileConfig.accentColor,
+                  },
+                ]}
+                onPress={handleToggleAudioWarning}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.offlineButtonText}>
+                  {audioWarningEnabled
+                    ? 'Kuulosuojainten \u00E4\u00E4nivaroitus: P\u00C4\u00C4LL\u00C4'
+                    : 'Kuulosuojainten \u00E4\u00E4nivaroitus: POIS'}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.offlineDownloadButton}
+                onPress={() => playWarningTone(AudioWarningLevel.DANGER_SECTOR_ENTER)}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.offlineButtonText}>{'Testaa merkki\u00E4\u00E4ni'}</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.offlineStatusText}>{audioStatus}</Text>
             <View style={styles.safetyBox}>
               <Text style={styles.safetyMain}>
                 Sallittu p‰‰sektori: vihre‰ 120∞
