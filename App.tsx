@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   StyleSheet,
   Text,
@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import MapView, { Polygon, Marker, UrlTile } from 'react-native-maps';
 import * as Location from 'expo-location';
+import { Magnetometer } from 'expo-sensors';
 import { parseOmaRiistaGeoJSON, Stand } from './src/utils/omariistaParser';
 import {
   calculateDangerZones,
@@ -65,6 +66,14 @@ import {
   packSearchSector,
   createPrioritySosAlert,
 } from './src/utils/sarStructures';
+import {
+  MapOrientationMode,
+  calculateHeadingFromMagnetometer,
+  smoothHeading,
+  generateViewConeCoordinates,
+  getCameraHeadingForMode,
+  toggleMapOrientationMode,
+} from './src/utils/compassHeading';
 
 const { width } = Dimensions.get('window');
 
@@ -144,6 +153,13 @@ export default function App() {
   const [userLocation, setUserLocation] = useState<Coordinates | null>(null);
   const [gpsStatus, setGpsStatus] = useState<string>('Haetaan GPS-yhteyttä...');
   const [showTopoLayer, setShowTopoLayer] = useState<boolean>(true);
+  const [orientationMode, setOrientationMode] = useState<MapOrientationMode>(
+    MapOrientationMode.NORTH_UP
+  );
+  const [compassHeading, setCompassHeading] = useState<number | null>(null);
+  const [compassAvailable, setCompassAvailable] = useState<boolean | null>(null);
+  const mapRef = useRef<MapView>(null);
+  const smoothedHeadingRef = useRef<number | null>(null);
 
   const profileConfig = useMemo(
     () => getProfileConfig(activeProfile),
@@ -276,6 +292,47 @@ export default function App() {
     };
   }, [huntingArea.stands, hunterState.currentStandId]);
 
+  // Kompassi: magnetometri -> pehmennetty atsimuutti
+  useEffect(() => {
+    let subscription: { remove: () => void } | null = null;
+    let cancelled = false;
+
+    Magnetometer.isAvailableAsync()
+      .then((available) => {
+        if (cancelled) return;
+        setCompassAvailable(available);
+        if (!available) return;
+
+        Magnetometer.setUpdateInterval(100);
+        subscription = Magnetometer.addListener(({ x, y }) => {
+          const raw = calculateHeadingFromMagnetometer({ x, y });
+          const smoothed = smoothHeading(smoothedHeadingRef.current, raw);
+          smoothedHeadingRef.current = smoothed;
+          // Paivitetaan tila vain >=1 asteen muutoksella (vahemman renderointeja)
+          setCompassHeading((prev) =>
+            prev === null ||
+            Math.abs(((smoothed - prev + 540) % 360) - 180) >= 1
+              ? smoothed
+              : prev
+          );
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setCompassAvailable(false);
+      });
+
+    return () => {
+      cancelled = true;
+      if (subscription) subscription.remove();
+    };
+  }, []);
+
+  // Kartan kamera: Heading-Up kaantaa kompassin mukaan, North-Up palauttaa pohjoiseen
+  useEffect(() => {
+    const heading = getCameraHeadingForMode(orientationMode, compassHeading);
+    mapRef.current?.animateCamera({ heading }, { duration: 200 });
+  }, [orientationMode, compassHeading]);
+
   const simulateStandArrival = (stand: Stand) => {
     const simulatedCoords = {
       latitude: stand.latitude + 0.00015,
@@ -385,6 +442,12 @@ export default function App() {
       ),
     }));
   }, [selectedStand, dangerZones]);
+
+  const viewConeCoords = useMemo(() => {
+    const origin = userLocation || selectedStand;
+    if (!origin || compassHeading === null) return [];
+    return generateViewConeCoordinates(origin, compassHeading);
+  }, [userLocation, selectedStand, compassHeading]);
 
   const handleSelectStand = (stand: Stand) => {
     setHunterState((prev) => selectStand(prev, stand.id, stand.name));
@@ -658,7 +721,9 @@ export default function App() {
             </TouchableOpacity>
           </View>
 
+          <View style={styles.mapWrapper}>
           <MapView
+            ref={mapRef}
             style={styles.map}
             initialRegion={initialRegion}
             mapType={showTopoLayer ? 'none' : 'standard'}
@@ -733,6 +798,16 @@ export default function App() {
               />
             )}
 
+            {viewConeCoords.length > 0 && (
+              <Polygon
+                coordinates={viewConeCoords}
+                strokeColor="#29B6F6"
+                fillColor="rgba(41, 182, 246, 0.35)"
+                strokeWidth={1}
+                zIndex={5}
+              />
+            )}
+
             {sosLockedLocation && (
               <Marker
                 coordinate={sosLockedLocation}
@@ -741,6 +816,32 @@ export default function App() {
               />
             )}
           </MapView>
+
+            {/* North-Up / Heading-Up -kytkin kartan ylakulmassa */}
+            <TouchableOpacity
+              style={[
+                styles.orientationToggle,
+                orientationMode === MapOrientationMode.HEADING_UP && {
+                  borderColor: profileConfig.accentColor,
+                },
+              ]}
+              onPress={() => setOrientationMode((prev) => toggleMapOrientationMode(prev))}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.orientationToggleText}>
+                {orientationMode === MapOrientationMode.HEADING_UP
+                  ? 'HEADING-UP'
+                  : 'NORTH-UP'}
+              </Text>
+              <Text style={styles.orientationHeadingText}>
+                {compassAvailable === false
+                  ? 'Kompassi N/A'
+                  : compassHeading !== null
+                  ? `${Math.round(compassHeading)}\u00B0`
+                  : '---'}
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* SAR & Taktiset kenttätoiminnot */}
@@ -1267,6 +1368,32 @@ const styles = StyleSheet.create({
     color: '#A5D6A7',
     fontSize: 12,
     fontWeight: '700',
+  },
+  mapWrapper: {
+    position: 'relative',
+  },
+  orientationToggle: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    backgroundColor: 'rgba(10, 14, 10, 0.85)',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#4F5F4F',
+    alignItems: 'center',
+  },
+  orientationToggleText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: 'bold',
+  },
+  orientationHeadingText: {
+    color: '#81D4FA',
+    fontSize: 11,
+    fontFamily: 'monospace',
+    marginTop: 2,
   },
   map: {
     width: width - 48,
