@@ -104,12 +104,12 @@ import {
 const { width } = Dimensions.get('window');
 
 const SAMPLE_SAR_SECTOR_VERTICES: Coordinates[] = [
-  { latitude: 61.052, longitude: 24.042 },
-  { latitude: 61.058, longitude: 24.042 },
-  { latitude: 61.061, longitude: 24.050 },
-  { latitude: 61.058, longitude: 24.058 },
-  { latitude: 61.052, longitude: 24.058 },
-  { latitude: 61.049, longitude: 24.050 },
+  { latitude: 61.012, longitude: 24.527 },
+  { latitude: 61.018, longitude: 24.527 },
+  { latitude: 61.021, longitude: 24.535 },
+  { latitude: 61.018, longitude: 24.543 },
+  { latitude: 61.012, longitude: 24.543 },
+  { latitude: 61.009, longitude: 24.535 },
 ];
 
 export default function App() {
@@ -207,7 +207,7 @@ export default function App() {
 
     const coords = overrideCoords ||
       userLocation ||
-      selectedStand || { latitude: 61.05, longitude: 24.05 };
+      selectedStand || { latitude: 61.015, longitude: 24.535 };
 
     const timestampSec = Math.floor(Date.now() / 1000);
     const payload = {
@@ -534,10 +534,10 @@ export default function App() {
   };
 
   const handleRestoreTestArea = () =>
-    applyHuntingArea(getDefaultTestArea(), 'Testialue palautettu (Hirvilohko 1)');
+    applyHuntingArea(getDefaultTestArea(), 'Testialue palautettu (H\u00E4til\u00E4 - Mets\u00E4stysalue)');
 
   const handleSendTrackDelta = () => {
-    const base = userLocation || selectedStand || { latitude: 61.05, longitude: 24.05 };
+    const base = userLocation || selectedStand || { latitude: 61.015, longitude: 24.535 };
     const sampleTrack: Coordinates[] = [
       base,
       { latitude: base.latitude + 0.0004, longitude: base.longitude + 0.0004 },
@@ -568,7 +568,7 @@ export default function App() {
   };
 
   const handleTriggerSos = () => {
-    const loc = userLocation || selectedStand || { latitude: 61.052, longitude: 24.053 };
+    const loc = userLocation || selectedStand || { latitude: 61.015, longitude: 24.535 };
     const sos = createPrioritySosAlert(1, loc);
     setSosLockedLocation(sos.location);
     dispatchEncryptedTelemetry(PacketType.SOS_ALERT, 0xff, 'SOS_ALERT (HÄTÄ)', loc);
@@ -600,11 +600,12 @@ export default function App() {
     }
   };
 
+  // Aloitusnakyma: Hatila, Hameenlinna
   const initialRegion = {
-    latitude: 61.055,
-    longitude: 24.05,
-    latitudeDelta: 0.03,
-    longitudeDelta: 0.05,
+    latitude: 61.015,
+    longitude: 24.535,
+    latitudeDelta: 0.045,
+    longitudeDelta: 0.07,
   };
 
   const safeSectorCoords = useMemo(() => {

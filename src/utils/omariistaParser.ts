@@ -342,7 +342,7 @@ export interface AreaRegion {
   longitudeDelta: number;
 }
 
-/** Oletuksena oleva testialue (sama kuin aiempi App.tsx:n mock-data). */
+/** Oletuksena oleva testialue: Hätilä, Hämeenlinna (keskipiste 61.015° N, 24.535° E). */
 export const DEFAULT_TEST_AREA_GEOJSON = {
   type: 'FeatureCollection',
   features: [
@@ -352,40 +352,40 @@ export const DEFAULT_TEST_AREA_GEOJSON = {
         type: 'Polygon',
         coordinates: [
           [
-            [24.0, 61.0],
-            [24.1, 61.0],
-            [24.1, 61.1],
-            [24.0, 61.1],
-            [24.0, 61.0],
+            [24.495, 60.995],
+            [24.575, 60.995],
+            [24.575, 61.035],
+            [24.495, 61.035],
+            [24.495, 60.995],
           ],
         ],
       },
-      properties: { name: 'Hirvilohko 1 (Pohjoinen)' },
+      properties: { name: 'Hätilä - Metsästysalue' },
     },
     {
       type: 'Feature',
-      geometry: { type: 'Point', coordinates: [24.05, 61.05] },
-      properties: { id: 'p1', name: 'P1 Kuusikko' },
+      geometry: { type: 'Point', coordinates: [24.532, 61.0145] },
+      properties: { id: 'p1', name: 'P1 Ampumaradan reuna' },
     },
     {
       type: 'Feature',
-      geometry: { type: 'Point', coordinates: [24.05, 61.06] },
-      properties: { id: 'p2', name: 'P2 Kallio (Pohjoinen)' },
+      geometry: { type: 'Point', coordinates: [24.535, 61.022] },
+      properties: { id: 'p2', name: 'P2 Pohjoislinja' },
     },
     {
       type: 'Feature',
-      geometry: { type: 'Point', coordinates: [24.07, 61.05] },
-      properties: { id: 'p3', name: 'P3 Tiehaara (Itä)' },
+      geometry: { type: 'Point', coordinates: [24.552, 61.015] },
+      properties: { id: 'p3', name: 'P3 Itäkangas' },
     },
     {
       type: 'Feature',
-      geometry: { type: 'Point', coordinates: [24.03, 61.05] },
-      properties: { id: 'p4', name: 'P4 Oja (Länsi)' },
+      geometry: { type: 'Point', coordinates: [24.534, 61.006] },
+      properties: { id: 'p4', name: 'P4 Eteläsuo' },
     },
   ],
 } as const;
 
-/** Palauttaa oletustestialueen (Hirvilohko 1) uutena kopiona. */
+/** Palauttaa oletustestialueen (Hätilä - Metsästysalue) uutena kopiona. */
 export function getDefaultTestArea(): HuntingArea {
   return parseOmaRiistaGeoJSON(DEFAULT_TEST_AREA_GEOJSON);
 }

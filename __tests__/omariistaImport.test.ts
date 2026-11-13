@@ -509,12 +509,37 @@ describe('calculateAreaCenter: kameran keskitys uuteen alueeseen', () => {
   });
 });
 
-describe('Oletustestialue (Hirvilohko 1)', () => {
-  it('palauttaa Hirvilohko 1 -alueen ja neljä passia', () => {
+describe('Oletustestialue (Hätilä, Hämeenlinna)', () => {
+  it('palauttaa Hätilän metsästysalueen ja neljä maastopassia', () => {
     const area = getDefaultTestArea();
-    expect(area.boundary?.name).toContain('Hirvilohko 1');
+    expect(area.boundary?.name).toBe('Hätilä - Metsästysalue');
     expect(area.stands.map((s) => s.id)).toEqual(['p1', 'p2', 'p3', 'p4']);
-    expect(area.stands[0].name).toBe('P1 Kuusikko');
+    expect(area.stands.map((s) => s.name)).toEqual([
+      'P1 Ampumaradan reuna',
+      'P2 Pohjoislinja',
+      'P3 Itäkangas',
+      'P4 Eteläsuo',
+    ]);
+    expect(area.stands[0]).toMatchObject({ latitude: 61.0145, longitude: 24.532 });
+    expect(area.stands[1]).toMatchObject({ latitude: 61.022, longitude: 24.535 });
+    expect(area.stands[2]).toMatchObject({ latitude: 61.015, longitude: 24.552 });
+    expect(area.stands[3]).toMatchObject({ latitude: 61.006, longitude: 24.534 });
+  });
+
+  it('aluraja kattaa välin lat 60.995..61.035, lon 24.495..24.575 ja kaikki passit ovat sen sisällä', () => {
+    const area = getDefaultTestArea();
+    const lats = area.boundary!.coordinates.map((c) => c.latitude);
+    const lons = area.boundary!.coordinates.map((c) => c.longitude);
+    expect(Math.min(...lats)).toBeCloseTo(60.995, 6);
+    expect(Math.max(...lats)).toBeCloseTo(61.035, 6);
+    expect(Math.min(...lons)).toBeCloseTo(24.495, 6);
+    expect(Math.max(...lons)).toBeCloseTo(24.575, 6);
+    for (const s of area.stands) {
+      expect(s.latitude).toBeGreaterThan(60.995);
+      expect(s.latitude).toBeLessThan(61.035);
+      expect(s.longitude).toBeGreaterThan(24.495);
+      expect(s.longitude).toBeLessThan(24.575);
+    }
   });
 
   it('on sama kuin tuotu DEFAULT_TEST_AREA_GEOJSON (kiertää tuontireitin)', () => {
@@ -529,10 +554,10 @@ describe('Oletustestialue (Hirvilohko 1)', () => {
     expect(getDefaultTestArea().stands).toHaveLength(4);
   });
 
-  it('keskittyy alueen keskelle (61.05, 24.05)', () => {
+  it('keskittyy Hätilän keskelle (61.015, 24.535)', () => {
     const region = calculateAreaCenter(getDefaultTestArea())!;
-    expect(region.latitude).toBeCloseTo(61.05, 6);
-    expect(region.longitude).toBeCloseTo(24.05, 6);
+    expect(region.latitude).toBeCloseTo(61.015, 6);
+    expect(region.longitude).toBeCloseTo(24.535, 6);
   });
 });
 

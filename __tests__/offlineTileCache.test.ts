@@ -23,7 +23,7 @@ import {
 } from '../src/utils/offlineTileCache';
 import { getTopoTileConfig } from '../src/utils/mapTiles';
 
-// Sama jahtialue kuin App.tsx:n MOCK_OMARIISTA_GEOJSON (n. 0.1° x 0.1° @ 61°N)
+// Itsenäinen testialue (n. 0.1° x 0.1° @ 61°N); suurempi kuin oletusalue, jotta 250 tiilen raja testautuu
 const HUNTING_AREA_POLYGON = [
   { latitude: 61.0, longitude: 24.0 },
   { latitude: 61.0, longitude: 24.1 },
