@@ -63,7 +63,16 @@ import {
   resolveShotOutcome,
   cancelShotReport,
 } from './src/utils/huntingState';
-import { getTopoTileConfig } from './src/utils/mapTiles';
+import { getTileLayerConfig } from './src/utils/mapTiles';
+import {
+  DEFAULT_MAP_LAYER,
+  MapLayerChoice,
+  getMapLayerAttribution,
+  getNextMapLayer,
+  getOfflineSourceLayer,
+  loadMapLayerPreference,
+  saveMapLayerPreference,
+} from './src/utils/mapLayerPreference';
 import {
   planOfflineTileDownload,
   downloadTilesToCache,
@@ -170,7 +179,11 @@ export default function App() {
   const [userLocation, setUserLocation] = useState<Coordinates | null>(null);
   const [gpsStatus, setGpsStatus] = useState<string>('Haetaan GPS-yhteyttä...');
   const [showTopoLayer, setShowTopoLayer] = useState<boolean>(true);
-  const [offlineCacheEnabled, setOfflineCacheEnabled] = useState<boolean>(false);
+  // Karttataso (#59): oletus OpenTopoMap, valinta tallennetaan pysyvasti
+  const [mapLayer, setMapLayer] = useState<MapLayerChoice>(DEFAULT_MAP_LAYER);
+  const lastOnlineMapLayerRef = useRef<MapLayerChoice>(DEFAULT_MAP_LAYER);
+  const mapLayerChangedByUserRef = useRef<boolean>(false);
+  const offlineCacheEnabled = mapLayer === 'offline';
   const [tileDownload, setTileDownload] = useState<TileDownloadState | null>(null);
   const [isDownloadingTiles, setIsDownloadingTiles] = useState<boolean>(false);
   const [storedTileCount, setStoredTileCount] = useState<number>(0);
@@ -193,22 +206,32 @@ export default function App() {
 
   const txAllowed = useMemo(() => canTransmitPacket(emconState), [emconState]);
 
-  // Online-lahde (myos offline-latauksen lahde). Avain tulee vain ymparistomuuttujasta.
+  // Offline-latauksen lahde: MML avaimen kanssa, muuten OpenTopoMap (#59).
+  // Avain tulee vain ymparistomuuttujasta.
   const onlineTileConfig = useMemo(
-    () => getTopoTileConfig(process.env.EXPO_PUBLIC_MML_API_KEY),
+    () =>
+      getTileLayerConfig(
+        getOfflineSourceLayer(process.env.EXPO_PUBLIC_MML_API_KEY),
+        process.env.EXPO_PUBLIC_MML_API_KEY
+      ),
     []
   );
 
-  // Aktiivinen kerros: offline-valimuisti paalla -> UrlTile lukee file://-hakemistoa
+  // Aktiivinen kerros kayttajan valinnan mukaan; offline -> UrlTile lukee file://-hakemistoa
   const tileConfig = useMemo(
     () =>
-      offlineCacheEnabled
-        ? getTopoTileConfig(process.env.EXPO_PUBLIC_MML_API_KEY, {
-            offlineCacheRootUri: Paths.document.uri,
-            offlineMaxNativeZ: cachedMaxZoom ?? undefined,
-          })
-        : onlineTileConfig,
-    [offlineCacheEnabled, onlineTileConfig, cachedMaxZoom]
+      getTileLayerConfig(mapLayer, process.env.EXPO_PUBLIC_MML_API_KEY, {
+        offlineCacheRootUri: Paths.document.uri,
+        offlineMaxNativeZ: cachedMaxZoom ?? undefined,
+      }),
+    [mapLayer, cachedMaxZoom]
+  );
+
+  const mapAttribution = useMemo(
+    () => (tileConfig.id === 'mml-maastokartta' || tileConfig.id === 'opentopomap'
+      ? getMapLayerAttribution(tileConfig.id)
+      : ''),
+    [tileConfig.id]
   );
 
   // Jahtialue: oletuksena testialue, vaihdettavissa OmaRiista GeoJSON -tuonnilla
@@ -496,13 +519,38 @@ export default function App() {
     }
   };
 
-  const handleToggleOfflineCache = () => {
-    setOfflineCacheEnabled((prev) => {
-      const next = !prev;
-      if (next) setShowTopoLayer(true);
-      return next;
-    });
+  const changeMapLayer = (next: MapLayerChoice) => {
+    mapLayerChangedByUserRef.current = true;
+    if (next !== 'offline') lastOnlineMapLayerRef.current = next;
+    setMapLayer(next);
+    setShowTopoLayer(true);
+    if (areaDocDir) saveMapLayerPreference(areaStorage, areaDocDir, next);
   };
+
+  // Karttatasopainike: OpenTopoMap -> MML (vain avaimella) -> Offline -> ...
+  const handleCycleMapLayer = () => {
+    changeMapLayer(getNextMapLayer(mapLayer, process.env.EXPO_PUBLIC_MML_API_KEY));
+  };
+
+  const handleToggleOfflineCache = () => {
+    changeMapLayer(offlineCacheEnabled ? lastOnlineMapLayerRef.current : 'offline');
+  };
+
+  // Kaynnistys: viimeksi valittu karttataso (oletus OpenTopoMap)
+  useEffect(() => {
+    let cancelled = false;
+    if (!areaDocDir) return;
+    loadMapLayerPreference(areaStorage, areaDocDir, process.env.EXPO_PUBLIC_MML_API_KEY).then(
+      (layer) => {
+        if (cancelled || mapLayerChangedByUserRef.current) return;
+        if (layer !== 'offline') lastOnlineMapLayerRef.current = layer;
+        setMapLayer(layer);
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [areaStorage, areaDocDir]);
 
   // Vaihtaa jahtialueen: passit paivittyvat, ensimmainen passi valitaan, kamera keskittyy
   const applyHuntingArea = (area: HuntingArea, statusText: string) => {
@@ -1122,6 +1170,15 @@ export default function App() {
                 styles.layerToggleButton,
                 { borderColor: profileConfig.accentColor },
               ]}
+              onPress={handleCycleMapLayer}
+            >
+              <Text style={styles.layerToggleText}>Vaihda taso</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[
+                styles.layerToggleButton,
+                { borderColor: profileConfig.accentColor },
+              ]}
               onPress={() => setShowTopoLayer((prev) => !prev)}
             >
               <Text style={styles.layerToggleText}>
@@ -1282,6 +1339,12 @@ export default function App() {
               />
             )}
           </MapView>
+
+            {showTopoLayer && mapAttribution ? (
+              <View style={styles.mapAttribution} pointerEvents="none">
+                <Text style={styles.mapAttributionText}>{mapAttribution}</Text>
+              </View>
+            ) : null}
 
             {/* North-Up / Heading-Up -kytkin kartan ylakulmassa */}
             <TouchableOpacity
@@ -2002,6 +2065,19 @@ const styles = StyleSheet.create({
   },
   mapWrapper: {
     position: 'relative',
+  },
+  mapAttribution: {
+    position: 'absolute',
+    left: 4,
+    bottom: 4,
+    backgroundColor: 'rgba(255, 255, 255, 0.75)',
+    paddingVertical: 1,
+    paddingHorizontal: 4,
+    borderRadius: 3,
+  },
+  mapAttributionText: {
+    color: '#222222',
+    fontSize: 9,
   },
   orientationToggle: {
     position: 'absolute',
