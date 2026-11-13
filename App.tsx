@@ -26,7 +26,17 @@ import {
   readImportFileText,
   getAreaPolygons,
   getAreaPoints,
+  AreaRegion,
 } from './src/utils/omariistaParser';
+import {
+  createLegacyAreaStorage,
+  loadLastUsedArea,
+  saveLastUsedArea,
+  resetToDefaultArea,
+  getDefaultPersistedArea,
+  shouldPersistRegion,
+  DEFAULT_START_REGION,
+} from './src/utils/areaPersistence';
 import {
   calculateDangerZones,
   generateSectorPolygonCoordinates,
@@ -182,6 +192,13 @@ export default function App() {
   const [huntingArea, setHuntingArea] = useState<HuntingArea>(() => getDefaultTestArea());
   const [areaImportStatus, setAreaImportStatus] = useState<string>('');
   const [isImportingArea, setIsImportingArea] = useState<boolean>(false);
+  // Pysyva aluetallennus: documentDirectory/huntertracker_last_area.json
+  const areaStorage = useMemo(() => createLegacyAreaStorage(FileSystem), []);
+  const areaDocDir = FileSystem.documentDirectory;
+  const [startRegion, setStartRegion] = useState<AreaRegion>(() => ({ ...DEFAULT_START_REGION }));
+  const [persistedAreaLoaded, setPersistedAreaLoaded] = useState<boolean>(false);
+  const areaChangedByUserRef = useRef<boolean>(false);
+  const lastPersistedRegionRef = useRef<AreaRegion | null>(null);
   const areaPolygons = useMemo(() => getAreaPolygons(huntingArea), [huntingArea]);
 
   const selectedStand = useMemo(
@@ -525,6 +542,15 @@ export default function App() {
           result.area.stands.length
         } passia)${warnings}`
       );
+
+      // Tuotu alue tallentuu automaattisesti pysyvaan muistiin
+      areaChangedByUserRef.current = true;
+      const importRegion = calculateAreaCenter(result.area);
+      lastPersistedRegionRef.current = importRegion;
+      if (areaDocDir) {
+        const saved = await saveLastUsedArea(areaStorage, areaDocDir, result.area, importRegion);
+        if (!saved.ok) setAreaImportStatus((prev) => `${prev} | VIRHE: ${saved.error}`);
+      }
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
       setAreaImportStatus(`VIRHE: tiedoston luku ep\u00E4onnistui (${detail})`);
@@ -533,8 +559,53 @@ export default function App() {
     }
   };
 
-  const handleRestoreTestArea = () =>
-    applyHuntingArea(getDefaultTestArea(), 'Testialue palautettu (H\u00E4til\u00E4 - Mets\u00E4stysalue)');
+  const handleRestoreTestArea = async () => {
+    areaChangedByUserRef.current = true;
+    lastPersistedRegionRef.current = null;
+    const reset = areaDocDir
+      ? await resetToDefaultArea(areaStorage, areaDocDir)
+      : getDefaultPersistedArea();
+    const message = 'Oletusalue palautettu (H\u00E4til\u00E4 - Mets\u00E4stysalue)';
+    applyHuntingArea(reset.area, reset.error ? `${message} | VIRHE: ${reset.error}` : message);
+  };
+
+  // Kaynnistys: viimeksi kaytetty alue (tai Hatila) ja kartan aloitussijainti
+  useEffect(() => {
+    let cancelled = false;
+    if (!areaDocDir) {
+      setPersistedAreaLoaded(true);
+      return;
+    }
+    loadLastUsedArea(areaStorage, areaDocDir).then((loaded) => {
+      if (cancelled) return;
+      // Ei ylikirjoiteta aluetta, jonka kayttaja ehti jo tuoda tai palauttaa
+      if (!areaChangedByUserRef.current) {
+        setHuntingArea(loaded.area);
+        setStartRegion(loaded.region);
+        lastPersistedRegionRef.current = loaded.source === 'saved' ? loaded.region : null;
+        if (loaded.error) {
+          setAreaImportStatus(
+            `VIRHE: ${loaded.error} - k\u00E4ytet\u00E4\u00E4n oletusaluetta (H\u00E4til\u00E4)`
+          );
+        } else if (loaded.source === 'saved') {
+          setAreaImportStatus(`Jatketaan viimeksi k\u00E4ytetylt\u00E4 alueelta: ${loaded.name}`);
+        }
+      }
+      setPersistedAreaLoaded(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [areaStorage, areaDocDir]);
+
+  // Kameran sijainti tallennetaan vain selvan siirron/zoomauksen jalkeen,
+  // ja vasta kun kaynnistyslataus on valmis (muuten oletus ylikirjoittaisi tallennuksen)
+  const handleMapRegionChangeComplete = (region: AreaRegion) => {
+    if (!persistedAreaLoaded || !areaDocDir) return;
+    if (!shouldPersistRegion(lastPersistedRegionRef.current, region)) return;
+    lastPersistedRegionRef.current = region;
+    saveLastUsedArea(areaStorage, areaDocDir, huntingArea, region);
+  };
 
   const handleSendTrackDelta = () => {
     const base = userLocation || selectedStand || { latitude: 61.015, longitude: 24.535 };
@@ -600,13 +671,8 @@ export default function App() {
     }
   };
 
-  // Aloitusnakyma: Hatila, Hameenlinna
-  const initialRegion = {
-    latitude: 61.015,
-    longitude: 24.535,
-    latitudeDelta: 0.045,
-    longitudeDelta: 0.07,
-  };
+  // Aloitusnakyma: viimeksi kaytetty alue, oletuksena Hatila (DEFAULT_START_REGION)
+  const initialRegion = startRegion;
 
   const safeSectorCoords = useMemo(() => {
     if (!selectedStand) return [];
@@ -975,9 +1041,11 @@ export default function App() {
 
           <View style={styles.mapWrapper}>
           <MapView
+            key={persistedAreaLoaded ? 'map-start-loaded' : 'map-start-default'}
             ref={mapRef}
             style={styles.map}
             initialRegion={initialRegion}
+            onRegionChangeComplete={handleMapRegionChangeComplete}
             mapType={showTopoLayer ? 'none' : 'standard'}
           >
             {showTopoLayer && (
@@ -1194,7 +1262,9 @@ export default function App() {
               disabled={isImportingArea}
               activeOpacity={0.7}
             >
-              <Text style={styles.offlineButtonText}>Palauta testialue</Text>
+              <Text style={styles.offlineButtonText}>
+                {'Palauta oletusalue (H\u00E4til\u00E4)'}
+              </Text>
             </TouchableOpacity>
           </View>
           {areaImportStatus.length > 0 && (
