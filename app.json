@@ -25,7 +25,8 @@
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_LOCATION",
         "android.permission.BLUETOOTH_CONNECT",
-        "android.permission.BLUETOOTH_SCAN"
+        "android.permission.BLUETOOTH_SCAN",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
       ]
     },
     "web": {
@@ -42,6 +43,12 @@
         }
       ],
       "./plugins/withUsbHostFeature"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "f07891a9-be17-4528-9fe4-d26bdbe98d07"
+      }
+    },
+    "owner": "jarkkokar"
   }
 }
