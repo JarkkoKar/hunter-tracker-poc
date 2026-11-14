@@ -1,5 +1,5 @@
-import React from 'react';
-import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useRef } from 'react';
+import { ScrollView, ScrollViewInstance, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { MAP_SCREEN_LAYERS } from '../utils/mapScreenLayout';
 
 export interface OverlaySheetProps {
@@ -7,13 +7,31 @@ export interface OverlaySheetProps {
   accentColor: string;
   onClose: () => void;
   children: React.ReactNode;
+  /**
+   * Vierityspyyntö (#61): kun `scrollKey` vaihtuu ja `scrollToY` on tiedossa,
+   * paneeli vierittää kerran kyseiseen kohtaan.
+   */
+  scrollKey?: string;
+  scrollToY?: number | null;
 }
 
 /**
  * Alapaneelin yläpuolelle avautuva vieritettävä paneeli (tiketti #60).
- * Sisältää toistaiseksi vanhan korttipinon osat; osa 2 (#61) järjestää ne uudelleen.
+ * Osa 2 (#61): Lisää-paneeli, johon Alue- ja Radio-pikavalinnat vierittävät.
  */
 export function OverlaySheet(props: OverlaySheetProps) {
+  const scrollRef = useRef<ScrollViewInstance>(null);
+  const lastScrolledKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (props.scrollKey === undefined || props.scrollToY === undefined || props.scrollToY === null) {
+      return;
+    }
+    if (lastScrolledKeyRef.current === props.scrollKey) return;
+    lastScrolledKeyRef.current = props.scrollKey;
+    scrollRef.current?.scrollTo({ y: props.scrollToY, animated: true });
+  }, [props.scrollKey, props.scrollToY]);
+
   return (
     <View style={styles.sheet}>
       <View style={styles.header}>
@@ -22,7 +40,9 @@ export function OverlaySheet(props: OverlaySheetProps) {
           <Text style={styles.closeText}>Sulje</Text>
         </TouchableOpacity>
       </View>
-      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
+      <ScrollView
+        ref={scrollRef}
+        contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         {props.children}
       </ScrollView>
     </View>
