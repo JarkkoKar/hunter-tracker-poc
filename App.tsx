@@ -96,11 +96,17 @@ import {
 } from './src/utils/emconState';
 import {
   createInitialTransportState,
-  connectUsbSerial,
   disconnectUsbSerial,
   setCellularHealth,
   routeOutgoingPacket,
+  applyMeshtasticLink,
+  TransportBearer,
 } from './src/utils/transportManager';
+import {
+  MeshtasticSerialBridge,
+  MeshtasticRadioSimulator,
+  describeMeshtasticLink,
+} from './src/utils/meshtasticSerialBridge';
 import {
   NativeUsbSerialModule,
   connectLoraSerial,
@@ -194,6 +200,8 @@ export default function App() {
   const [lastCotPreview, setLastCotPreview] = useState<string>('');
   const [loraDriverLabel, setLoraDriverLabel] = useState<string>('');
   const loraDriverRef = useRef<ISerialPortDriver | null>(null);
+  const meshBridgeRef = useRef<MeshtasticSerialBridge | null>(null);
+  const [meshLinkText, setMeshLinkText] = useState<string>('');
   const [showSarSector, setShowSarSector] = useState<boolean>(false);
   const [sosLockedLocation, setSosLockedLocation] = useState<Coordinates | null>(
     null
@@ -326,6 +334,14 @@ export default function App() {
       emconState,
       encryptedFrame
     );
+    // 2b. USB-C-väylällä kehys lähtee Meshtastic-radiolle PRIVATE_APP-pakettina.
+    const meshBridge = meshBridgeRef.current;
+    if (routeResult.dispatched && routeResult.bearerUsed === TransportBearer.LORA_USB_SERIAL && meshBridge) {
+      meshBridge.sendPrivateApp(encryptedFrame).then((ok) => {
+        refreshMeshLink(meshBridge);
+        if (!ok) setLastTxLog(`Meshtastic: kehystä ei lähetetty (tila ${meshBridge.getState()})`);
+      });
+    }
 
     // 3. CoT XML -käännös paikalliselle ATAK-sillalle
     const cotXml = convertFrameToCotXml(payload, activeProfile);
@@ -763,13 +779,31 @@ export default function App() {
     );
   };
 
-  // Suljetaan USB-OTG-ajuri, kun sovellus sulkeutuu.
+  // Suljetaan Meshtastic-silta ja USB-OTG-ajuri, kun sovellus sulkeutuu.
   useEffect(() => {
     return () => {
+      meshBridgeRef.current?.close();
+      meshBridgeRef.current = null;
       loraDriverRef.current?.close();
       loraDriverRef.current = null;
     };
   }, []);
+
+  // Hätätyhjennys välitetään myös kytketylle LoRa-radiolle (kanavan PSK vaihdetaan).
+  useEffect(() => {
+    const bridge = meshBridgeRef.current;
+    if (!zeroizeState.wiped || !bridge) return;
+    bridge.zeroizeChannelPsk().then((res) => {
+      setLastTxLog(`Meshtastic ZEROIZE (kanavan PSK vaihdettu): ${res}`);
+    });
+  }, [zeroizeState.wiped]);
+
+  const refreshMeshLink = (bridge: MeshtasticSerialBridge) => {
+    const c = bridge.getCounters();
+    setMeshLinkText(
+      describeMeshtasticLink({ state: bridge.getState(), framesSent: c.framesSent, framesReceived: c.framesReceived })
+    );
+  };
 
   const toggleUsbZeroRf = async () => {
     if (!transportState.usbSerialConnected) {
@@ -777,26 +811,62 @@ export default function App() {
         NATIVE_USB_SERIAL_MODULE,
         NATIVE_USB_SERIAL_MODULE ? 'native' : 'simulation'
       );
-      loraDriverRef.current = lora.driver;
+      // Ilman fyysistä radiota (LOOPBACK) käytetään Meshtastic-radion simulaattoria,
+      // jotta kättely ja PRIVATE_APP-kehykset toimivat myös Expo Go:ssa.
+      let driver: ISerialPortDriver = lora.driver;
+      if (lora.driver.kind === 'LOOPBACK') {
+        await lora.driver.close();
+        driver = new MeshtasticRadioSimulator(lora.status);
+      }
+      loraDriverRef.current = driver;
       setLoraDriverLabel(lora.label);
-      // Kaapelin irrotus kesken ajon -> palataan hallitusti 4G/LoRa Meshiin.
-      lora.driver.onStatusChange((status) => {
-        if (status !== 'DISCONNECTED' || loraDriverRef.current !== lora.driver) return;
-        loraDriverRef.current = null;
-        setLoraDriverLabel('');
-        setTransportState((prev) => disconnectUsbSerial(prev));
-        setLastTxLog('USB-C kaapeli irrotettu | Radion 2.4 GHz BLE palautettu');
+      const bridge = new MeshtasticSerialBridge(driver);
+      meshBridgeRef.current = bridge;
+      bridge.onPrivateApp(() => refreshMeshLink(bridge));
+      // Kaapelin irrotus tai virhe -> palataan hallitusti 4G/LoRa Meshiin.
+      bridge.onStateChange((linkState) => {
+        if (meshBridgeRef.current !== bridge) return;
+        refreshMeshLink(bridge);
+        setTransportState((prev) =>
+          applyMeshtasticLink(prev, { state: linkState, bluetoothDisabled: bridge.isBluetoothDisabled() })
+        );
+        if (linkState === 'DISCONNECTED' || linkState === 'ERROR') {
+          meshBridgeRef.current = null;
+          loraDriverRef.current = null;
+          setLoraDriverLabel('');
+          // Virhetilassa suljetaan myös sarjaportti, jotta uusi kytkentä alkaa puhtaalta pöydältä.
+          if (linkState === 'ERROR') void bridge.close();
+          setLastTxLog(
+            linkState === 'ERROR'
+              ? 'Meshtastic-kättely epäonnistui | Palattu 4G/LoRa Mesh -reititykseen'
+              : 'USB-C kaapeli irrotettu | Palattu 4G/LoRa Mesh -reititykseen'
+          );
+        }
       });
-      const { state, adminCommand } = connectUsbSerial(transportState, 115200);
-      setTransportState(state);
+      setTransportState((prev) => applyMeshtasticLink(prev, { state: 'HANDSHAKING', bluetoothDisabled: false }));
+      const linkState = await bridge.connect();
+      refreshMeshLink(bridge);
+      if (linkState !== 'CONNECTED') {
+        setLastTxLog(`USB-C (115200 bps) [${lora.label}] | Meshtastic: ${linkState}`);
+        return;
+      }
+      const bleResult = await bridge.disableBluetooth();
+      refreshMeshLink(bridge);
+      setTransportState((prev) =>
+        applyMeshtasticLink(prev, { state: bridge.getState(), bluetoothDisabled: bridge.isBluetoothDisabled() })
+      );
       setLastTxLog(
-        `USB-C (115200 bps) kytketty [${lora.label}] | Lähetetty: ${adminCommand}`
+        `USB-C (115200 bps) kytketty [${lora.label}] | Meshtastic-kättely OK | BLE pois: ${bleResult}`
       );
     } else {
+      const bridge = meshBridgeRef.current;
+      meshBridgeRef.current = null;
       const driver = loraDriverRef.current;
       loraDriverRef.current = null;
       setLoraDriverLabel('');
-      await driver?.close();
+      setMeshLinkText('');
+      if (bridge) await bridge.close();
+      else await driver?.close();
       const state = disconnectUsbSerial(transportState);
       setTransportState(state);
       setLastTxLog('USB-C irrotettu | Radion 2.4 GHz BLE palautettu');
@@ -1408,6 +1478,9 @@ export default function App() {
                   <Text style={styles.txLogText}>{lastTxLog}</Text>
                   {transportState.usbSerialConnected && loraDriverLabel.length > 0 && (
                     <Text style={styles.txLogText}>LoRa-radio: {loraDriverLabel}</Text>
+                  )}
+                  {transportState.usbSerialConnected && meshLinkText.length > 0 && (
+                    <Text style={styles.txLogText}>{meshLinkText}</Text>
                   )}
                   {lastCotPreview.length > 0 && (
                     <Text style={styles.cotLogText}>{lastCotPreview}</Text>
