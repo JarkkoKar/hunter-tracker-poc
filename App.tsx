@@ -8,6 +8,7 @@ import {
   SafeAreaView,
   StatusBar,
   Dimensions,
+  LayoutChangeEvent,
 } from 'react-native';
 import MapView, { Polygon, Marker, UrlTile } from 'react-native-maps';
 import * as Location from 'expo-location';
@@ -150,6 +151,15 @@ import { MapStatusBar } from './src/components/MapStatusBar';
 import { MapFabColumn } from './src/components/MapFabColumn';
 import { BottomActionPanel, QuickActionId } from './src/components/BottomActionPanel';
 import { OverlaySheet } from './src/components/OverlaySheet';
+import { SegmentedControl } from './src/components/SegmentedControl';
+import {
+  getMorePanelFocusSection,
+  getMorePanelScrollOffset,
+  getMapLayerSegments,
+  getEmconSegments,
+  EMCON_UNLOCK_LONG_PRESS_MS,
+  MorePanelSectionId,
+} from './src/utils/morePanel';
 
 const { width } = Dimensions.get('window');
 
@@ -194,6 +204,11 @@ export default function App() {
   const [userLocation, setUserLocation] = useState<Coordinates | null>(null);
   const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   const [openSheet, setOpenSheet] = useState<MapSheetId | null>(null);
+  // Lisaa-paneeli (#61): osioiden y-sijainnit vieritysta varten ja EMCON-ohje
+  const [moreSectionOffsets, setMoreSectionOffsets] = useState<
+    Partial<Record<MorePanelSectionId, number>>
+  >({});
+  const [emconHint, setEmconHint] = useState<string>('');
   const [gpsStatus, setGpsStatus] = useState<string>('Haetaan GPS-yhteyttä...');
   const [showTopoLayer, setShowTopoLayer] = useState<boolean>(true);
   // Karttataso (#59): oletus OpenTopoMap, valinta tallennetaan pysyvasti
@@ -976,6 +991,20 @@ export default function App() {
   );
   const headingStatus = formatHeadingStatus(headingSafety, compassAvailable, compassHeading);
 
+  // Lisaa-paneeli (#61): Alue ja Radio vierittavat omaan osioonsa
+  const morePanelScrollY = getMorePanelScrollOffset(
+    moreSectionOffsets,
+    getMorePanelFocusSection(openSheet)
+  );
+  const recordMoreSection = (id: MorePanelSectionId) => (e: LayoutChangeEvent) => {
+    const y = e.nativeEvent.layout.y;
+    setMoreSectionOffsets((prev) => (prev[id] === y ? prev : { ...prev, [id]: y }));
+  };
+  const handleSelectEmconMode = (mode: RadioTxMode) => {
+    setEmconHint('');
+    setEmconState((prev) => setRadioTxMode(prev, mode, true));
+  };
+
   const lastShotLabel = hunterState.lastShot
     ? `Viimeisin ilmoitus: ${hunterState.lastShot.outcome} (${new Date(
         hunterState.lastShot.timestamp
@@ -1170,12 +1199,16 @@ export default function App() {
             ) : null}
           </View>
 
-          {openSheet === 'AREA' && (
+          {openSheet !== null && (
             <OverlaySheet
-              title={`${profileConfig.areaLabel.toUpperCase()} JA ${profileConfig.nodeLabel.toUpperCase()}`}
+              title="LISÄÄ"
               accentColor={profileConfig.accentColor}
               onClose={() => setOpenSheet(null)}
+              scrollKey={openSheet}
+              scrollToY={morePanelScrollY}
             >
+              {/* Lisaa-paneeli (#61): alue, karttataso, radio, profiili, hatatyhjennys; testaus lopussa */}
+              <View onLayout={recordMoreSection('AREA')}>
                 {/* Jahtialueen hallinta: OmaRiista GeoJSON -tuonti */}
                 <View style={styles.section}>
                   <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
@@ -1190,7 +1223,7 @@ export default function App() {
                       activeOpacity={0.7}
                     >
                       <Text style={styles.offlineButtonText}>
-                        {isImportingArea ? 'Luetaan tiedostoa...' : 'Tuo OmaRiista GeoJSON'}
+                        {isImportingArea ? 'Luetaan tiedostoa...' : 'Tuo GeoJSON-tiedosto'}
                       </Text>
                     </TouchableOpacity>
                     <TouchableOpacity
@@ -1218,7 +1251,7 @@ export default function App() {
 
                 <View style={styles.section}>
                   <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
-                    1. VALITSE {profileConfig.nodeLabel.toUpperCase()}
+                    VALITSE {profileConfig.nodeLabel.toUpperCase()}
                   </Text>
                   <View style={styles.standGrid}>
                     {huntingArea.stands.map((stand) => {
@@ -1249,15 +1282,111 @@ export default function App() {
                     })}
                   </View>
                 </View>
-            </OverlaySheet>
-          )}
+              </View>
 
-          {openSheet === 'RADIO' && (
-            <OverlaySheet
-              title="RADIO JA SIIRTOTIE"
-              accentColor={profileConfig.accentColor}
-              onClose={() => setOpenSheet(null)}
-            >
+                <View style={styles.section} onLayout={recordMoreSection('MAP_LAYER')}>
+                  <View style={styles.mapHeaderRow}>
+                    <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
+                      KARTTA: {showTopoLayer ? tileConfig.label.toUpperCase() : 'PERUSKARTTA'}
+                    </Text>
+                    <TouchableOpacity
+                      style={[
+                        styles.layerToggleButton,
+                        { borderColor: profileConfig.accentColor },
+                      ]}
+                      onPress={() => setShowTopoLayer((prev) => !prev)}
+                    >
+                      <Text style={styles.layerToggleText}>
+                        {showTopoLayer ? 'Maastokartta: PÄÄLLÄ' : 'Maastokartta: POIS'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* Karttataso (#61): OpenTopoMap / MML Maasto / Offline */}
+                  <SegmentedControl
+                    options={getMapLayerSegments(mapLayer, process.env.EXPO_PUBLIC_MML_API_KEY).map(
+                      (seg) => ({
+                        value: seg.id,
+                        label: seg.label,
+                        selected: seg.id === mapLayer,
+                        enabled: seg.enabled,
+                      })
+                    )}
+                    onSelect={(layer) => changeMapLayer(layer)}
+                  />
+
+                  {/* Offline-karttavalimuisti */}
+                  <View style={styles.offlineRow}>
+                    <TouchableOpacity
+                      style={[
+                        styles.offlineDownloadButton,
+                        isDownloadingTiles && styles.offlineButtonBusy,
+                      ]}
+                      onPress={handleDownloadOfflineTiles}
+                      disabled={isDownloadingTiles}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.offlineButtonText}>
+                        {isDownloadingTiles && tileDownload
+                          ? `Ladataan... ${getDownloadProgressPercent(tileDownload)} % (${
+                              tileDownload.completed + tileDownload.failed
+                            }/${tileDownload.total})`
+                          : 'Lataa jahtialue offline-k\u00E4ytt\u00F6\u00F6n'}
+                      </Text>
+                    </TouchableOpacity>
+
+                  </View>
+                  <Text style={styles.offlineStatusText}>
+                    {`Tallennettu: ${storedTileCount} tiilt\u00E4 (${onlineTileConfig.id})`}
+                    {offlineStatus ? ` | ${offlineStatus}` : ''}
+                    {offlineCacheEnabled && storedTileCount === 0
+                      ? ' | Ei tallennettuja tiili\u00E4 - lataa ensin'
+                      : ''}
+                  </Text>
+                </View>
+
+              <View style={styles.section} onLayout={recordMoreSection('RADIO')}>
+                <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
+                  {`RADIO JA RADIOKURI \u00B7 ${radioStatus.label}`}
+                </Text>
+                {/* EMCON-radiokurin ohjauspalkki */}
+                <View
+                  style={[
+                    styles.emconCard,
+                    emconState.mode === RadioTxMode.NORMAL && styles.emconNormal,
+                    emconState.mode === RadioTxMode.BURST_MANUAL && styles.emconBurst,
+                    emconState.mode === RadioTxMode.RX_ONLY && styles.emconRxOnly,
+                  ]}
+                >
+                  <View style={styles.emconHeaderRow}>
+                    <Text style={styles.emconTitle}>
+                      EMCON RADIOKURI: [{emconState.mode}]
+                    </Text>
+                    <Text style={styles.emconSub}>
+                      {emconState.mode === RadioTxMode.RX_ONLY
+                        ? 'TX LUKITTU (VAIN KUUNTELU)'
+                        : 'LÄHETYS SALLITTU'}
+                    </Text>
+                  </View>
+
+                  <SegmentedControl
+                    options={getEmconSegments(emconState.mode).map((seg) => ({
+                      value: seg.mode,
+                      label: seg.label,
+                      selected: seg.selected,
+                      longPressMs: seg.requiresLongPress ? EMCON_UNLOCK_LONG_PRESS_MS : undefined,
+                    }))}
+                    onSelect={handleSelectEmconMode}
+                    onLongPressRequired={() =>
+                      setEmconHint('Pid\u00E4 painettuna 2 s palauttaaksesi l\u00E4hetyksen')
+                    }
+                  />
+                  {emconState.mode === RadioTxMode.RX_ONLY && (
+                    <Text style={styles.emconSub}>
+                      {emconHint || 'Paluu l\u00E4hetykseen: pid\u00E4 NORMAL tai BURST painettuna 2 s'}
+                    </Text>
+                  )}
+                </View>
                 {/* Hybridi & Zero-RF Siirtokerroksen + E2EE/CoT ohjaus */}
                 <View style={styles.transportCard}>
                   <View style={styles.transportHeaderRow}>
@@ -1315,87 +1444,10 @@ export default function App() {
                   </View>
                 </View>
 
-                {/* EMCON-radiokurin ohjauspalkki */}
-                <View
-                  style={[
-                    styles.emconCard,
-                    emconState.mode === RadioTxMode.NORMAL && styles.emconNormal,
-                    emconState.mode === RadioTxMode.BURST_MANUAL && styles.emconBurst,
-                    emconState.mode === RadioTxMode.RX_ONLY && styles.emconRxOnly,
-                  ]}
-                >
-                  <View style={styles.emconHeaderRow}>
-                    <Text style={styles.emconTitle}>
-                      EMCON RADIOKURI: [{emconState.mode}]
-                    </Text>
-                    <Text style={styles.emconSub}>
-                      {emconState.mode === RadioTxMode.RX_ONLY
-                        ? 'TX LUKITTU (VAIN KUUNTELU)'
-                        : 'LÄHETYS SALLITTU'}
-                    </Text>
-                  </View>
+              </View>
 
-                  <View style={styles.emconButtonsRow}>
-                    {emconState.mode !== RadioTxMode.RX_ONLY ? (
-                      <>
-                        <TouchableOpacity
-                          style={styles.emconBurstBtn}
-                          onPress={() =>
-                            setEmconState((prev) =>
-                              setRadioTxMode(
-                                prev,
-                                prev.mode === RadioTxMode.NORMAL
-                                  ? RadioTxMode.BURST_MANUAL
-                                  : RadioTxMode.NORMAL,
-                                true
-                              )
-                            )
-                          }
-                        >
-                          <Text style={styles.emconBtnText}>
-                            {emconState.mode === RadioTxMode.NORMAL
-                              ? 'Vaihda BURST_MANUAL'
-                              : 'Vaihda NORMAL'}
-                          </Text>
-                        </TouchableOpacity>
-
-                        <TouchableOpacity
-                          style={styles.emconSilenceBtn}
-                          onPress={() =>
-                            setEmconState((prev) =>
-                              setRadioTxMode(prev, RadioTxMode.RX_ONLY, true)
-                            )
-                          }
-                        >
-                          <Text style={styles.emconBtnText}>ASETA RX_ONLY (HILJAISUUS)</Text>
-                        </TouchableOpacity>
-                      </>
-                    ) : (
-                      <TouchableOpacity
-                        style={styles.emconUnlockBtn}
-                        delayLongPress={2000}
-                        onLongPress={() =>
-                          setEmconState((prev) =>
-                            setRadioTxMode(prev, RadioTxMode.NORMAL, true)
-                          )
-                        }
-                      >
-                        <Text style={styles.emconBtnText}>
-                          PAINA 2 SEKUNTIA PALAUTTAAKSESI LÄHETYKSEN (NORMAL)
-                        </Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-                </View>
-            </OverlaySheet>
-          )}
-
-          {openSheet === 'MORE' && (
-            <OverlaySheet
-              title="LISÄÄ"
-              accentColor={profileConfig.accentColor}
-              onClose={() => setOpenSheet(null)}
-            >
+              <View style={styles.section} onLayout={recordMoreSection('PROFILE')}>
+                <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>PROFIILI</Text>
                 {/* Profiilivalitsin: HUNTER / SAR / TACTICAL */}
                 <View style={styles.profileRow}>
                   {[ActiveProfile.HUNTER, ActiveProfile.SAR, ActiveProfile.TACTICAL].map(
@@ -1428,85 +1480,57 @@ export default function App() {
                   )}
                 </View>
 
-        {/* Karttataso ja offline-karttavalimuisti */}
-        <View style={styles.section}>
-                  <View style={styles.mapHeaderRow}>
-                    <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
-                      KARTTA: {showTopoLayer ? tileConfig.label.toUpperCase() : 'PERUSKARTTA'}
-                    </Text>
-                    <TouchableOpacity
-                      style={[
-                        styles.layerToggleButton,
-                        { borderColor: profileConfig.accentColor },
-                      ]}
-                      onPress={handleCycleMapLayer}
-                    >
-                      <Text style={styles.layerToggleText}>Vaihda taso</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[
-                        styles.layerToggleButton,
-                        { borderColor: profileConfig.accentColor },
-                      ]}
-                      onPress={() => setShowTopoLayer((prev) => !prev)}
-                    >
-                      <Text style={styles.layerToggleText}>
-                        {showTopoLayer ? 'Maastokartta: PÄÄLLÄ' : 'Maastokartta: POIS'}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
+              </View>
 
-                  {/* Offline-karttavalimuisti */}
-                  <View style={styles.offlineRow}>
-                    <TouchableOpacity
-                      style={[
-                        styles.offlineDownloadButton,
-                        isDownloadingTiles && styles.offlineButtonBusy,
-                      ]}
-                      onPress={handleDownloadOfflineTiles}
-                      disabled={isDownloadingTiles}
-                      activeOpacity={0.7}
-                    >
-                      <Text style={styles.offlineButtonText}>
-                        {isDownloadingTiles && tileDownload
-                          ? `Ladataan... ${getDownloadProgressPercent(tileDownload)} % (${
-                              tileDownload.completed + tileDownload.failed
-                            }/${tileDownload.total})`
-                          : 'Lataa kartta offline-tilaan'}
-                      </Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                      style={[
-                        styles.offlineToggleButton,
-                        offlineCacheEnabled && {
-                          backgroundColor: '#1B5E20',
-                          borderColor: profileConfig.accentColor,
-                        },
-                      ]}
-                      onPress={handleToggleOfflineCache}
-                      activeOpacity={0.7}
-                    >
-                      <Text style={styles.offlineButtonText}>
-                        {offlineCacheEnabled
-                          ? 'Offline-v\u00E4limuisti: P\u00C4\u00C4LL\u00C4'
-                          : 'Offline-v\u00E4limuisti: POIS'}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                  <Text style={styles.offlineStatusText}>
-                    {`Tallennettu: ${storedTileCount} tiilt\u00E4 (${onlineTileConfig.id})`}
-                    {offlineStatus ? ` | ${offlineStatus}` : ''}
-                    {offlineCacheEnabled && storedTileCount === 0
-                      ? ' | Ei tallennettuja tiili\u00E4 - lataa ensin'
-                      : ''}
+              <View onLayout={recordMoreSection('ZEROIZE')}>
+                {/* Kaksivaiheinen Zeroize-hätätyhjennys */}
+                <View style={styles.zeroizeCard}>
+                  <Text style={styles.zeroizeHeader}>
+                    HÄTÄTYHJENNYS (ZEROIZE — KAKSIVAIHEINEN SUOJA)
                   </Text>
-        </View>
+                  <Text style={styles.zeroizeDesc}>
+                    Avaimia muistissa: {zeroizeState.wiped ? '0 (TYHJENNETTY)' : 'AKTIIVINEN'}
+                  </Text>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.coverButton,
+                      zeroizeState.coverOpen && styles.coverButtonOpen,
+                    ]}
+                    onPress={() =>
+                      setZeroizeState((prev) =>
+                        setZeroizeCoverOpen(prev, !prev.coverOpen)
+                      )
+                    }
+                    disabled={zeroizeState.wiped}
+                  >
+                    <Text style={styles.coverButtonText}>
+                      {zeroizeState.coverOpen
+                        ? 'VAIHE 1: SUOJAKANSI AUKI (Napauta sulkeaksesi)'
+                        : 'VAIHE 1: AVAA SUOJAKANSI'}
+                    </Text>
+                  </TouchableOpacity>
+
+                  {zeroizeState.coverOpen && !zeroizeState.wiped && (
+                    <TouchableOpacity
+                      style={styles.slideZeroizeButton}
+                      delayLongPress={1500}
+                      onLongPress={() =>
+                        setZeroizeState((prev) => attemptSlideToZeroize(prev, 95))
+                      }
+                    >
+                      <Text style={styles.slideZeroizeText}>
+                        VAIHE 2: PIDÄ POHJASSA (&gt;85% LIUKU) — ZEROIZE NYT
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
 
                 {selectedStand && (
                   <View style={styles.section}>
                     <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
-                      2. SEKTORITURVALLISUUS
+                      SEKTORITURVALLISUUS
                     </Text>
                     <View style={styles.areaButtonsRow}>
                       <TouchableOpacity
@@ -1606,48 +1630,6 @@ export default function App() {
                   </TouchableOpacity>
                 </View>
 
-                {/* Kaksivaiheinen Zeroize-hätätyhjennys */}
-                <View style={styles.zeroizeCard}>
-                  <Text style={styles.zeroizeHeader}>
-                    4. HÄTÄTYHJENNYS (ZEROIZE — KAKSIVAIHEINEN SUOJA)
-                  </Text>
-                  <Text style={styles.zeroizeDesc}>
-                    Avaimia muistissa: {zeroizeState.wiped ? '0 (TYHJENNETTY)' : 'AKTIIVINEN'}
-                  </Text>
-
-                  <TouchableOpacity
-                    style={[
-                      styles.coverButton,
-                      zeroizeState.coverOpen && styles.coverButtonOpen,
-                    ]}
-                    onPress={() =>
-                      setZeroizeState((prev) =>
-                        setZeroizeCoverOpen(prev, !prev.coverOpen)
-                      )
-                    }
-                    disabled={zeroizeState.wiped}
-                  >
-                    <Text style={styles.coverButtonText}>
-                      {zeroizeState.coverOpen
-                        ? 'VAIHE 1: SUOJAKANSI AUKI (Napauta sulkeaksesi)'
-                        : 'VAIHE 1: AVAA SUOJAKANSI'}
-                    </Text>
-                  </TouchableOpacity>
-
-                  {zeroizeState.coverOpen && !zeroizeState.wiped && (
-                    <TouchableOpacity
-                      style={styles.slideZeroizeButton}
-                      delayLongPress={1500}
-                      onLongPress={() =>
-                        setZeroizeState((prev) => attemptSlideToZeroize(prev, 95))
-                      }
-                    >
-                      <Text style={styles.slideZeroizeText}>
-                        VAIHE 2: PIDÄ POHJASSA (&gt;85% LIUKU) — ZEROIZE NYT
-                      </Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
             </OverlaySheet>
           )}
 
