@@ -135,6 +135,21 @@ import {
   shouldTriggerHapticAlert,
   HeadingDangerResult,
 } from './src/utils/compassHeading';
+import {
+  getBottomPanelState,
+  shouldShowHeadingWarning,
+  toggleSheet,
+  formatGpsAccuracy,
+  formatAreaSummary,
+  formatRadioStatus,
+  formatHeadingStatus,
+  MAP_SCREEN_LAYERS,
+  MapSheetId,
+} from './src/utils/mapScreenLayout';
+import { MapStatusBar } from './src/components/MapStatusBar';
+import { MapFabColumn } from './src/components/MapFabColumn';
+import { BottomActionPanel, QuickActionId } from './src/components/BottomActionPanel';
+import { OverlaySheet } from './src/components/OverlaySheet';
 
 const { width } = Dimensions.get('window');
 
@@ -177,6 +192,8 @@ export default function App() {
     createInitialHunterState('Passimies 1')
   );
   const [userLocation, setUserLocation] = useState<Coordinates | null>(null);
+  const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
+  const [openSheet, setOpenSheet] = useState<MapSheetId | null>(null);
   const [gpsStatus, setGpsStatus] = useState<string>('Haetaan GPS-yhteyttä...');
   const [showTopoLayer, setShowTopoLayer] = useState<boolean>(true);
   // Karttataso (#59): oletus OpenTopoMap, valinta tallennetaan pysyvasti
@@ -340,6 +357,7 @@ export default function App() {
               longitude: loc.coords.longitude,
             };
             setUserLocation(coords);
+            setGpsAccuracy(loc.coords.accuracy ?? null);
 
             const nearest = findNearestStand(coords, huntingArea.stands, 50);
             if (nearest && nearest.stand.id !== hunterState.currentStandId) {
@@ -928,6 +946,36 @@ export default function App() {
 
   const handleCancelShot = () => setHunterState((prev) => cancelShotReport(prev));
 
+  // Koko näytön karttanäkymä (tiketti #60): alapaneelin pikavalinnat ja keskitys
+  const handleQuickAction = (id: QuickActionId) => {
+    if (id === 'SOS') {
+      handleTriggerSos();
+      return;
+    }
+    setOpenSheet((prev) => toggleSheet(prev, id));
+  };
+
+  const handleCenterOnUser = () => {
+    if (!userLocation) return;
+    mapRef.current?.animateToRegion(
+      {
+        latitude: userLocation.latitude,
+        longitude: userLocation.longitude,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01,
+      },
+      500
+    );
+  };
+
+  const bottomPanel = getBottomPanelState(hunterState.status, txAllowed);
+  const radioStatus = formatRadioStatus(
+    transportState.activeBearer,
+    emconState.mode,
+    transportState.cellularAvailable
+  );
+  const headingStatus = formatHeadingStatus(headingSafety, compassAvailable, compassHeading);
+
   const lastShotLabel = hunterState.lastShot
     ? `Viimeisin ilmoitus: ${hunterState.lastShot.outcome} (${new Date(
         hunterState.lastShot.timestamp
@@ -948,431 +996,132 @@ export default function App() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar barStyle="light-content" />
-      <ScrollView contentContainerStyle={styles.container}>
-        <View style={styles.header}>
-          <Text style={[styles.appName, { color: profileConfig.accentColor }]}>
-            HunterTrackerLight // {profileConfig.id}
-          </Text>
-          <Text style={styles.subTitle}>
-            {profileConfig.areaLabel}: {huntingArea.boundary?.name || 'Alue 1'} |{' '}
-            {gpsStatus}
-          </Text>
-          <Text style={styles.coordDisplay}>
-            [{profileConfig.coordinateSystem}] {formattedUserCoords}
-          </Text>
-        </View>
-
-        {zeroizeState.wiped && (
-          <View style={styles.wipedBanner}>
-            <Text style={styles.wipedBannerTitle}>
-              [ZEROIZED] KAIKKI AVAIMET JA PAIKALLINEN DATA TYHJENNETTY
-            </Text>
-            <Text style={styles.wipedBannerSub}>
-              Lähetetty radiolle: {zeroizeState.loraRadioCommand}
-            </Text>
-          </View>
-        )}
-
-        {/* Profiilivalitsin: HUNTER / SAR / TACTICAL */}
-        <View style={styles.profileRow}>
-          {[ActiveProfile.HUNTER, ActiveProfile.SAR, ActiveProfile.TACTICAL].map(
-            (prof) => {
-              const isSelected = activeProfile === prof;
-              const cfg = getProfileConfig(prof);
-              return (
-                <TouchableOpacity
-                  key={prof}
-                  style={[
-                    styles.profileChip,
-                    isSelected && {
-                      backgroundColor: cfg.accentColor,
-                      borderColor: '#FFFFFF',
-                    },
-                  ]}
-                  onPress={() => setActiveProfile(prof)}
-                >
-                  <Text
-                    style={[
-                      styles.profileChipText,
-                      isSelected && { color: '#0A0E0A', fontWeight: 'bold' },
-                    ]}
-                  >
-                    {prof}
-                  </Text>
-                </TouchableOpacity>
-              );
-            }
-          )}
-        </View>
-
-        {/* Hybridi & Zero-RF Siirtokerroksen + E2EE/CoT ohjaus */}
-        <View style={styles.transportCard}>
-          <View style={styles.transportHeaderRow}>
-            <Text style={styles.transportTitle}>
-              SIIRTOTIE: [{transportState.activeBearer}]
-            </Text>
-            <Text
-              style={[
-                styles.bleBadge,
-                transportState.radioBleDisabled && styles.bleDisabledBadge,
-              ]}
+      <View style={styles.screen}>
+        {/* Kartta koko näytön taustana (tiketti #60) */}
+        <View style={styles.mapFull}>
+            <MapView
+              key={persistedAreaLoaded ? 'map-start-loaded' : 'map-start-default'}
+              ref={mapRef}
+              style={styles.mapFullscreen}
+              initialRegion={initialRegion}
+              onRegionChangeComplete={handleMapRegionChangeComplete}
+              mapType={showTopoLayer ? 'none' : 'standard'}
             >
-              {transportState.radioBleDisabled
-                ? 'BLE: OFF (ZERO-RF)'
-                : 'E2EE: ACTIVE'}
-            </Text>
-          </View>
-
-          <Text style={styles.txLogText}>{lastTxLog}</Text>
-          {transportState.usbSerialConnected && loraDriverLabel.length > 0 && (
-            <Text style={styles.txLogText}>LoRa-radio: {loraDriverLabel}</Text>
-          )}
-          {lastCotPreview.length > 0 && (
-            <Text style={styles.cotLogText}>{lastCotPreview}</Text>
-          )}
-
-          <View style={styles.transportButtonsRow}>
-            <TouchableOpacity
-              style={[
-                styles.transportToggleBtn,
-                !transportState.cellularAvailable && styles.transportWarnBtn,
-              ]}
-              onPress={toggleCellularOutage}
-            >
-              <Text style={styles.transportBtnText}>
-                {transportState.cellularAvailable
-                  ? '4G/5G: OK (Simuloi katve)'
-                  : '4G/5G: KATVE (LoRa aktiivinen)'}
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.transportToggleBtn,
-                transportState.usbSerialConnected && styles.transportZeroRfBtn,
-              ]}
-              onPress={toggleUsbZeroRf}
-            >
-              <Text style={styles.transportBtnText}>
-                {transportState.usbSerialConnected
-                  ? 'USB-C 115200: KYTKETTY'
-                  : 'Kytke USB-C (Zero-RF)'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {/* EMCON-radiokurin ohjauspalkki */}
-        <View
-          style={[
-            styles.emconCard,
-            emconState.mode === RadioTxMode.NORMAL && styles.emconNormal,
-            emconState.mode === RadioTxMode.BURST_MANUAL && styles.emconBurst,
-            emconState.mode === RadioTxMode.RX_ONLY && styles.emconRxOnly,
-          ]}
-        >
-          <View style={styles.emconHeaderRow}>
-            <Text style={styles.emconTitle}>
-              EMCON RADIOKURI: [{emconState.mode}]
-            </Text>
-            <Text style={styles.emconSub}>
-              {emconState.mode === RadioTxMode.RX_ONLY
-                ? 'TX LUKITTU (VAIN KUUNTELU)'
-                : 'LÄHETYS SALLITTU'}
-            </Text>
-          </View>
-
-          <View style={styles.emconButtonsRow}>
-            {emconState.mode !== RadioTxMode.RX_ONLY ? (
-              <>
-                <TouchableOpacity
-                  style={styles.emconBurstBtn}
-                  onPress={() =>
-                    setEmconState((prev) =>
-                      setRadioTxMode(
-                        prev,
-                        prev.mode === RadioTxMode.NORMAL
-                          ? RadioTxMode.BURST_MANUAL
-                          : RadioTxMode.NORMAL,
-                        true
-                      )
-                    )
-                  }
-                >
-                  <Text style={styles.emconBtnText}>
-                    {emconState.mode === RadioTxMode.NORMAL
-                      ? 'Vaihda BURST_MANUAL'
-                      : 'Vaihda NORMAL'}
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={styles.emconSilenceBtn}
-                  onPress={() =>
-                    setEmconState((prev) =>
-                      setRadioTxMode(prev, RadioTxMode.RX_ONLY, true)
-                    )
-                  }
-                >
-                  <Text style={styles.emconBtnText}>ASETA RX_ONLY (HILJAISUUS)</Text>
-                </TouchableOpacity>
-              </>
-            ) : (
-              <TouchableOpacity
-                style={styles.emconUnlockBtn}
-                delayLongPress={2000}
-                onLongPress={() =>
-                  setEmconState((prev) =>
-                    setRadioTxMode(prev, RadioTxMode.NORMAL, true)
-                  )
-                }
-              >
-                <Text style={styles.emconBtnText}>
-                  PAINA 2 SEKUNTIA PALAUTTAAKSESI LÄHETYKSEN (NORMAL)
-                </Text>
-              </TouchableOpacity>
-            )}
-          </View>
-        </View>
-
-        {/* Tilakortti */}
-        <View
-          style={[
-            styles.statusCard,
-            { borderLeftColor: profileConfig.accentColor },
-            hunterState.status === 'SHOT_FIRED' && styles.statusShot,
-            hunterState.status === 'WOUNDED' && styles.statusWounded,
-          ]}
-        >
-          <Text style={styles.statusLabel}>TILANNE:</Text>
-          <Text style={styles.statusValue}>[{hunterState.status}]</Text>
-          {hunterState.standName && (
-            <Text style={styles.statusStand}>
-              {profileConfig.nodeLabel}: {hunterState.standName}
-              {distanceToCurrentStand !== null
-                ? ` (etäisyys ${distanceToCurrentStand} m)`
-                : ''}
-            </Text>
-          )}
-          {hunterState.lastShot && (
-            <Text style={styles.lastShotText}>{lastShotLabel}</Text>
-          )}
-        </View>
-
-        {/* Karttanäkymä */}
-        <View style={styles.mapContainer}>
-          <View style={styles.mapHeaderRow}>
-            <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
-              KARTTA: {showTopoLayer ? tileConfig.label.toUpperCase() : 'PERUSKARTTA'}
-            </Text>
-            <TouchableOpacity
-              style={[
-                styles.layerToggleButton,
-                { borderColor: profileConfig.accentColor },
-              ]}
-              onPress={handleCycleMapLayer}
-            >
-              <Text style={styles.layerToggleText}>Vaihda taso</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[
-                styles.layerToggleButton,
-                { borderColor: profileConfig.accentColor },
-              ]}
-              onPress={() => setShowTopoLayer((prev) => !prev)}
-            >
-              <Text style={styles.layerToggleText}>
-                {showTopoLayer ? 'Maastokartta: PÄÄLLÄ' : 'Maastokartta: POIS'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          {/* Offline-karttavalimuisti */}
-          <View style={styles.offlineRow}>
-            <TouchableOpacity
-              style={[
-                styles.offlineDownloadButton,
-                isDownloadingTiles && styles.offlineButtonBusy,
-              ]}
-              onPress={handleDownloadOfflineTiles}
-              disabled={isDownloadingTiles}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.offlineButtonText}>
-                {isDownloadingTiles && tileDownload
-                  ? `Ladataan... ${getDownloadProgressPercent(tileDownload)} % (${
-                      tileDownload.completed + tileDownload.failed
-                    }/${tileDownload.total})`
-                  : 'Lataa kartta offline-tilaan'}
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.offlineToggleButton,
-                offlineCacheEnabled && {
-                  backgroundColor: '#1B5E20',
-                  borderColor: profileConfig.accentColor,
-                },
-              ]}
-              onPress={handleToggleOfflineCache}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.offlineButtonText}>
-                {offlineCacheEnabled
-                  ? 'Offline-v\u00E4limuisti: P\u00C4\u00C4LL\u00C4'
-                  : 'Offline-v\u00E4limuisti: POIS'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-          <Text style={styles.offlineStatusText}>
-            {`Tallennettu: ${storedTileCount} tiilt\u00E4 (${onlineTileConfig.id})`}
-            {offlineStatus ? ` | ${offlineStatus}` : ''}
-            {offlineCacheEnabled && storedTileCount === 0
-              ? ' | Ei tallennettuja tiili\u00E4 - lataa ensin'
-              : ''}
-          </Text>
-
-          <View style={styles.mapWrapper}>
-          <MapView
-            key={persistedAreaLoaded ? 'map-start-loaded' : 'map-start-default'}
-            ref={mapRef}
-            style={styles.map}
-            initialRegion={initialRegion}
-            onRegionChangeComplete={handleMapRegionChangeComplete}
-            mapType={showTopoLayer ? 'none' : 'standard'}
-          >
-            {showTopoLayer && (
-              <UrlTile
-                key={tileConfig.isOffline ? 'tiles-offline' : 'tiles-online'}
-                urlTemplate={tileConfig.urlTemplate}
-                maximumZ={tileConfig.maximumZ}
-                maximumNativeZ={tileConfig.maximumNativeZ}
-                flipY={false}
-                zIndex={-1}
-              />
-            )}
-
-            {/* Kaikki jahtialueen palstat (OmaRiista MultiPolygon) */}
-            {areaPolygons.map((parcel, index) => (
-              <Polygon
-                key={`parcel-${index}`}
-                coordinates={parcel.coordinates}
-                strokeColor={profileConfig.accentColor}
-                fillColor="rgba(76, 175, 80, 0.12)"
-                strokeWidth={2}
-              />
-            ))}
-
-            {showSarSector && (
-              <Polygon
-                coordinates={SAMPLE_SAR_SECTOR_VERTICES}
-                strokeColor="#FF9800"
-                fillColor="rgba(255, 152, 0, 0.25)"
-                strokeWidth={2}
-              />
-            )}
-
-            {safeSectorCoords.length > 0 && (
-              <Polygon
-                coordinates={safeSectorCoords}
-                strokeColor="#2E7D32"
-                fillColor="rgba(46, 125, 50, 0.35)"
-                strokeWidth={1}
-              />
-            )}
-
-            {dangerZonePolygons.map((dz) => (
-              <Polygon
-                key={dz.standId}
-                coordinates={dz.coordinates}
-                strokeColor="#D32F2F"
-                fillColor="rgba(211, 47, 47, 0.45)"
-                strokeWidth={1}
-              />
-            ))}
-
-            {huntingArea.stands.map((stand) => {
-              const isSelected = stand.id === hunterState.currentStandId;
-              return (
-                <Marker
-                  key={stand.id}
-                  coordinate={{
-                    latitude: stand.latitude,
-                    longitude: stand.longitude,
-                  }}
-                  title={stand.name}
-                  pinColor={isSelected ? 'green' : 'orange'}
-                  onPress={() => handleSelectStand(stand)}
+              {showTopoLayer && (
+                <UrlTile
+                  key={tileConfig.isOffline ? 'tiles-offline' : 'tiles-online'}
+                  urlTemplate={tileConfig.urlTemplate}
+                  maximumZ={tileConfig.maximumZ}
+                  maximumNativeZ={tileConfig.maximumNativeZ}
+                  flipY={false}
+                  zIndex={-1}
                 />
-              );
-            })}
+              )}
 
-            {userLocation && (
-              <Marker
-                coordinate={userLocation}
-                title="Oma sijainti"
-                pinColor="blue"
-              />
-            )}
+              {/* Kaikki jahtialueen palstat (OmaRiista MultiPolygon) */}
+              {areaPolygons.map((parcel, index) => (
+                <Polygon
+                  key={`parcel-${index}`}
+                  coordinates={parcel.coordinates}
+                  strokeColor={profileConfig.accentColor}
+                  fillColor="rgba(76, 175, 80, 0.12)"
+                  strokeWidth={2}
+                />
+              ))}
 
-            {viewConeCoords.length > 0 && (
-              <Polygon
-                key={headingSafety.isDanger ? 'view-cone-danger' : 'view-cone-safe'}
-                coordinates={viewConeCoords}
-                strokeColor={headingSafety.isDanger ? '#D50000' : '#29B6F6'}
-                fillColor={
-                  headingSafety.isDanger
-                    ? 'rgba(213, 0, 0, 0.65)'
-                    : 'rgba(41, 182, 246, 0.35)'
-                }
-                strokeWidth={headingSafety.isDanger ? 2 : 1}
-                zIndex={5}
-              />
-            )}
+              {showSarSector && (
+                <Polygon
+                  coordinates={SAMPLE_SAR_SECTOR_VERTICES}
+                  strokeColor="#FF9800"
+                  fillColor="rgba(255, 152, 0, 0.25)"
+                  strokeWidth={2}
+                />
+              )}
 
-            {sosLockedLocation && (
-              <Marker
-                coordinate={sosLockedLocation}
-                title="SOS HÄTÄPAIKKA"
-                pinColor="red"
-              />
-            )}
-          </MapView>
+              {safeSectorCoords.length > 0 && (
+                <Polygon
+                  coordinates={safeSectorCoords}
+                  strokeColor="#2E7D32"
+                  fillColor="rgba(46, 125, 50, 0.35)"
+                  strokeWidth={1}
+                />
+              )}
 
-            {showTopoLayer && mapAttribution ? (
-              <View style={styles.mapAttribution} pointerEvents="none">
-                <Text style={styles.mapAttributionText}>{mapAttribution}</Text>
-              </View>
-            ) : null}
+              {dangerZonePolygons.map((dz) => (
+                <Polygon
+                  key={dz.standId}
+                  coordinates={dz.coordinates}
+                  strokeColor="#D32F2F"
+                  fillColor="rgba(211, 47, 47, 0.45)"
+                  strokeWidth={1}
+                />
+              ))}
 
-            {/* North-Up / Heading-Up -kytkin kartan ylakulmassa */}
-            <TouchableOpacity
-              style={[
-                styles.orientationToggle,
-                orientationMode === MapOrientationMode.HEADING_UP && {
-                  borderColor: profileConfig.accentColor,
-                },
-              ]}
-              onPress={() => setOrientationMode((prev) => toggleMapOrientationMode(prev))}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.orientationToggleText}>
-                {orientationMode === MapOrientationMode.HEADING_UP
-                  ? 'HEADING-UP'
-                  : 'NORTH-UP'}
-              </Text>
-              <Text style={styles.orientationHeadingText}>
-                {compassAvailable === false
-                  ? 'Kompassi N/A'
-                  : compassHeading !== null
-                  ? `${Math.round(compassHeading)}\u00B0`
-                  : '---'}
-              </Text>
-            </TouchableOpacity>
+              {huntingArea.stands.map((stand) => {
+                const isSelected = stand.id === hunterState.currentStandId;
+                return (
+                  <Marker
+                    key={stand.id}
+                    coordinate={{
+                      latitude: stand.latitude,
+                      longitude: stand.longitude,
+                    }}
+                    title={stand.name}
+                    pinColor={isSelected ? 'green' : 'orange'}
+                    onPress={() => handleSelectStand(stand)}
+                  />
+                );
+              })}
 
-            {headingSafety.isDanger && (
-              <View style={styles.fovWarningBar}>
+              {userLocation && (
+                <Marker
+                  coordinate={userLocation}
+                  title="Oma sijainti"
+                  pinColor="blue"
+                />
+              )}
+
+              {viewConeCoords.length > 0 && (
+                <Polygon
+                  key={headingSafety.isDanger ? 'view-cone-danger' : 'view-cone-safe'}
+                  coordinates={viewConeCoords}
+                  strokeColor={headingSafety.isDanger ? '#D50000' : '#29B6F6'}
+                  fillColor={
+                    headingSafety.isDanger
+                      ? 'rgba(213, 0, 0, 0.65)'
+                      : 'rgba(41, 182, 246, 0.35)'
+                  }
+                  strokeWidth={headingSafety.isDanger ? 2 : 1}
+                  zIndex={5}
+                />
+              )}
+
+              {sosLockedLocation && (
+                <Marker
+                  coordinate={sosLockedLocation}
+                  title="SOS HÄTÄPAIKKA"
+                  pinColor="red"
+                />
+              )}
+            </MapView>
+        </View>
+
+        <View style={styles.overlay} pointerEvents="box-none">
+          <MapStatusBar
+            profileId={profileConfig.id}
+            accentColor={profileConfig.accentColor}
+            areaSummary={formatAreaSummary(huntingArea.boundary?.name, areaPolygons.length)}
+            gpsStatus={gpsStatus}
+            gpsAccuracyText={formatGpsAccuracy(gpsAccuracy)}
+            coordinateSystem={profileConfig.coordinateSystem}
+            coordinatesText={formattedUserCoords}
+            radioLabel={radioStatus.label}
+            radioLevel={radioStatus.level}
+          />
+
+          {/* Suuntavaroitus aina yläpalkin alla, kaikkien paneelien päällä */}
+          {shouldShowHeadingWarning(headingSafety.isDanger, openSheet) && (
+              <View style={styles.headingWarningBar} pointerEvents="none">
                 <Text style={styles.fovWarningText}>
                   {`VAROITUS: T\u00C4HT\u00C4YSSUUNTA KOHTI PASSIA ${
                     headingSafety.conflictingStandName ?? ''
@@ -1384,337 +1133,597 @@ export default function App() {
                   )}\u00B0`}
                 </Text>
               </View>
-            )}
-          </View>
-        </View>
-
-        {/* SAR & Taktiset kenttätoiminnot */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
-            SAR & TAKTISET TIETORAKENTEET
-          </Text>
-          <View style={styles.sarButtonsRow}>
-            <TouchableOpacity
-              style={styles.sarBtn}
-              onPress={handleSendTrackDelta}
-              disabled={!txAllowed}
-            >
-              <Text style={styles.sarBtnText}>Jaa TRACK_DELTA</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.sarBtn}
-              onPress={handleToggleSearchSector}
-              disabled={!txAllowed}
-            >
-              <Text style={styles.sarBtnText}>
-                {showSarSector ? 'Piilota Etsintälohko' : 'SEARCH_SECTOR (6p)'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          <TouchableOpacity
-            style={[styles.sosButton, !txAllowed && styles.disabledButton]}
-            onPress={handleTriggerSos}
-            disabled={!txAllowed}
-          >
-            <Text style={styles.sosButtonText}>
-              [SOS_ALERT — PRIORISOITU HÄTÄILMOITUS]
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
-            GPS-AUTOMAATTI / TESTAUS
-          </Text>
-          <TouchableOpacity
-            style={styles.simButton}
-            onPress={() => simulateStandArrival(huntingArea.stands[0])}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.simButtonText}>
-              Simuloi: Saavu kohteeseen P1 Kuusikko (&lt; 20 m)
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Jahtialueen hallinta: OmaRiista GeoJSON -tuonti */}
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
-            JAHTIALUE: {huntingArea.boundary?.name || 'Ei aluerajaa'} (
-            {huntingArea.stands.length} passia)
-          </Text>
-          <View style={styles.areaButtonsRow}>
-            <TouchableOpacity
-              style={[styles.areaImportButton, isImportingArea && styles.offlineButtonBusy]}
-              onPress={handleImportOmaRiista}
-              disabled={isImportingArea}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.offlineButtonText}>
-                {isImportingArea ? 'Luetaan tiedostoa...' : 'Tuo OmaRiista GeoJSON'}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.offlineToggleButton}
-              onPress={handleRestoreTestArea}
-              disabled={isImportingArea}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.offlineButtonText}>
-                {'Palauta oletusalue (H\u00E4til\u00E4)'}
-              </Text>
-            </TouchableOpacity>
-          </View>
-          {areaImportStatus.length > 0 && (
-            <Text
-              style={[
-                styles.offlineStatusText,
-                areaImportStatus.startsWith('VIRHE') && styles.areaImportError,
-              ]}
-            >
-              {areaImportStatus}
-            </Text>
           )}
-        </View>
 
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
-            1. VALITSE {profileConfig.nodeLabel.toUpperCase()}
-          </Text>
-          <View style={styles.standGrid}>
-            {huntingArea.stands.map((stand) => {
-              const isSelected = stand.id === hunterState.currentStandId;
-              return (
-                <TouchableOpacity
-                  key={stand.id}
-                  style={[
-                    styles.standButton,
-                    isSelected && {
-                      backgroundColor: '#2E7D32',
-                      borderColor: profileConfig.accentColor,
-                    },
-                  ]}
-                  onPress={() => handleSelectStand(stand)}
-                  activeOpacity={0.7}
-                >
-                  <Text
-                    style={[
-                      styles.standButtonText,
-                      isSelected && styles.standButtonTextActive,
-                    ]}
-                  >
-                    {stand.name}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-
-        {selectedStand && (
-          <View style={styles.section}>
-            <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
-              2. SEKTORITURVALLISUUS
-            </Text>
-            <View style={styles.areaButtonsRow}>
-              <TouchableOpacity
-                style={[
-                  styles.offlineToggleButton,
-                  audioWarningEnabled && {
-                    backgroundColor: '#1B5E20',
-                    borderColor: profileConfig.accentColor,
-                  },
-                ]}
-                onPress={handleToggleAudioWarning}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.offlineButtonText}>
-                  {audioWarningEnabled
-                    ? 'Kuulosuojainten \u00E4\u00E4nivaroitus: P\u00C4\u00C4LL\u00C4'
-                    : 'Kuulosuojainten \u00E4\u00E4nivaroitus: POIS'}
+            {zeroizeState.wiped && (
+              <View style={styles.wipedBanner}>
+                <Text style={styles.wipedBannerTitle}>
+                  [ZEROIZED] KAIKKI AVAIMET JA PAIKALLINEN DATA TYHJENNETTY
                 </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.offlineDownloadButton}
-                onPress={() => playWarningTone(AudioWarningLevel.DANGER_SECTOR_ENTER)}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.offlineButtonText}>{'Testaa merkki\u00E4\u00E4ni'}</Text>
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.offlineStatusText}>{audioStatus}</Text>
-            <View style={styles.safetyBox}>
-              <Text style={styles.safetyMain}>
-                Sallittu pääsektori: vihreä 120°
-              </Text>
-              <Text style={styles.dangerHeader}>
-                Lasketut naapurikieltokulmat (±15°):
-              </Text>
-              {dangerZones.map((zone) => (
-                <View key={zone.standId} style={styles.dangerRow}>
-                  <Text style={styles.dangerStand}>{zone.standName}:</Text>
-                  <Text style={styles.dangerDegrees}>
-                    suunta {Math.round(zone.centerAngle)}° (KIELTO{' '}
-                    {Math.round(zone.startAngle)}° - {Math.round(zone.endAngle)}°)
-                  </Text>
-                </View>
-              ))}
-            </View>
-          </View>
-        )}
+                <Text style={styles.wipedBannerSub}>
+                  Lähetetty radiolle: {zeroizeState.loraRadioCommand}
+                </Text>
+              </View>
+            )}
 
-        <View style={styles.section}>
-          <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
-            3. TILANNEKUYITTAUS {!txAllowed ? '(ESTETTY: RX_ONLY)' : ''}
-          </Text>
-
-          {hunterState.status === 'IN_STAND' && (
-            <TouchableOpacity
-              style={[
-                styles.bigButton,
-                txAllowed ? styles.readyButton : styles.disabledButton,
-              ]}
-              onPress={handleReady}
-              disabled={!txAllowed}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.bigButtonText}>
-                {profileConfig.readyActionLabel}
-              </Text>
-            </TouchableOpacity>
-          )}
-
-          {hunterState.status === 'READY' && (
-            <TouchableOpacity
-              style={[
-                styles.bigButton,
-                txAllowed ? styles.shotButton : styles.disabledButton,
-              ]}
-              onPress={handleShotFired}
-              disabled={!txAllowed}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.bigButtonText}>
-                {profileConfig.alertActionLabel}
-              </Text>
-            </TouchableOpacity>
-          )}
-
-          {hunterState.status === 'SHOT_FIRED' && (
-            <View style={styles.outcomeContainer}>
-              <TouchableOpacity
-                style={[
-                  styles.bigButton,
-                  txAllowed ? styles.harvestButton : styles.disabledButton,
-                ]}
-                onPress={() => handleOutcome('HARVEST')}
-                disabled={!txAllowed}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.bigButtonText}>[KAATO / OK]</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[
-                  styles.bigButton,
-                  txAllowed ? styles.missButton : styles.disabledButton,
-                ]}
-                onPress={() => handleOutcome('MISS')}
-                disabled={!txAllowed}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.bigButtonText}>[OHI / EI HAVAINTOA]</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[
-                  styles.bigButton,
-                  txAllowed ? styles.woundedButton : styles.disabledButton,
-                ]}
-                onPress={() => handleOutcome('WOUNDED')}
-                disabled={!txAllowed}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.bigButtonText}>[HAAVAKKO / HÄTÄ]</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.cancelButton}
-                onPress={handleCancelShot}
-                activeOpacity={0.7}
-              >
-                <Text style={styles.cancelButtonText}>Peruuta ilmoitus</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-
-          {(hunterState.status === 'HARVEST' ||
-            hunterState.status === 'WOUNDED') && (
-            <TouchableOpacity
-              style={[
-                styles.bigButton,
-                txAllowed ? styles.readyButton : styles.disabledButton,
-                { marginTop: 12 },
-              ]}
-              onPress={handleReady}
-              disabled={!txAllowed}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.bigButtonText}>[PALAA VALMIUTEEN]</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-
-        {/* Kaksivaiheinen Zeroize-hätätyhjennys */}
-        <View style={styles.zeroizeCard}>
-          <Text style={styles.zeroizeHeader}>
-            4. HÄTÄTYHJENNYS (ZEROIZE — KAKSIVAIHEINEN SUOJA)
-          </Text>
-          <Text style={styles.zeroizeDesc}>
-            Avaimia muistissa: {zeroizeState.wiped ? '0 (TYHJENNETTY)' : 'AKTIIVINEN'}
-          </Text>
-
-          <TouchableOpacity
-            style={[
-              styles.coverButton,
-              zeroizeState.coverOpen && styles.coverButtonOpen,
-            ]}
-            onPress={() =>
-              setZeroizeState((prev) =>
-                setZeroizeCoverOpen(prev, !prev.coverOpen)
-              )
-            }
-            disabled={zeroizeState.wiped}
-          >
-            <Text style={styles.coverButtonText}>
-              {zeroizeState.coverOpen
-                ? 'VAIHE 1: SUOJAKANSI AUKI (Napauta sulkeaksesi)'
-                : 'VAIHE 1: AVAA SUOJAKANSI'}
-            </Text>
-          </TouchableOpacity>
-
-          {zeroizeState.coverOpen && !zeroizeState.wiped && (
-            <TouchableOpacity
-              style={styles.slideZeroizeButton}
-              delayLongPress={1500}
-              onLongPress={() =>
-                setZeroizeState((prev) => attemptSlideToZeroize(prev, 95))
+          <View style={styles.mapSpacer} pointerEvents="box-none">
+            <MapFabColumn
+              accentColor={profileConfig.accentColor}
+              headingUp={orientationMode === MapOrientationMode.HEADING_UP}
+              headingText={
+                compassAvailable === false
+                  ? 'N/A'
+                  : compassHeading !== null
+                  ? `${Math.round(compassHeading)}\u00B0`
+                  : '---'
               }
+              onToggleOrientation={() => setOrientationMode((prev) => toggleMapOrientationMode(prev))}
+              layerLabel={showTopoLayer ? tileConfig.label : 'Perus'}
+              onCycleLayer={handleCycleMapLayer}
+              onCenter={handleCenterOnUser}
+              centerEnabled={userLocation !== null}
+            />
+            {showTopoLayer && mapAttribution ? (
+              <View style={styles.mapAttribution} pointerEvents="none">
+                <Text style={styles.mapAttributionText}>{mapAttribution}</Text>
+              </View>
+            ) : null}
+          </View>
+
+          {openSheet === 'AREA' && (
+            <OverlaySheet
+              title={`${profileConfig.areaLabel.toUpperCase()} JA ${profileConfig.nodeLabel.toUpperCase()}`}
+              accentColor={profileConfig.accentColor}
+              onClose={() => setOpenSheet(null)}
             >
-              <Text style={styles.slideZeroizeText}>
-                VAIHE 2: PIDÄ POHJASSA (&gt;85% LIUKU) — ZEROIZE NYT
-              </Text>
-            </TouchableOpacity>
+                {/* Jahtialueen hallinta: OmaRiista GeoJSON -tuonti */}
+                <View style={styles.section}>
+                  <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
+                    JAHTIALUE: {huntingArea.boundary?.name || 'Ei aluerajaa'} (
+                    {huntingArea.stands.length} passia)
+                  </Text>
+                  <View style={styles.areaButtonsRow}>
+                    <TouchableOpacity
+                      style={[styles.areaImportButton, isImportingArea && styles.offlineButtonBusy]}
+                      onPress={handleImportOmaRiista}
+                      disabled={isImportingArea}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.offlineButtonText}>
+                        {isImportingArea ? 'Luetaan tiedostoa...' : 'Tuo OmaRiista GeoJSON'}
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.offlineToggleButton}
+                      onPress={handleRestoreTestArea}
+                      disabled={isImportingArea}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.offlineButtonText}>
+                        {'Palauta oletusalue (H\u00E4til\u00E4)'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                  {areaImportStatus.length > 0 && (
+                    <Text
+                      style={[
+                        styles.offlineStatusText,
+                        areaImportStatus.startsWith('VIRHE') && styles.areaImportError,
+                      ]}
+                    >
+                      {areaImportStatus}
+                    </Text>
+                  )}
+                </View>
+
+                <View style={styles.section}>
+                  <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
+                    1. VALITSE {profileConfig.nodeLabel.toUpperCase()}
+                  </Text>
+                  <View style={styles.standGrid}>
+                    {huntingArea.stands.map((stand) => {
+                      const isSelected = stand.id === hunterState.currentStandId;
+                      return (
+                        <TouchableOpacity
+                          key={stand.id}
+                          style={[
+                            styles.standButton,
+                            isSelected && {
+                              backgroundColor: '#2E7D32',
+                              borderColor: profileConfig.accentColor,
+                            },
+                          ]}
+                          onPress={() => handleSelectStand(stand)}
+                          activeOpacity={0.7}
+                        >
+                          <Text
+                            style={[
+                              styles.standButtonText,
+                              isSelected && styles.standButtonTextActive,
+                            ]}
+                          >
+                            {stand.name}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                </View>
+            </OverlaySheet>
           )}
+
+          {openSheet === 'RADIO' && (
+            <OverlaySheet
+              title="RADIO JA SIIRTOTIE"
+              accentColor={profileConfig.accentColor}
+              onClose={() => setOpenSheet(null)}
+            >
+                {/* Hybridi & Zero-RF Siirtokerroksen + E2EE/CoT ohjaus */}
+                <View style={styles.transportCard}>
+                  <View style={styles.transportHeaderRow}>
+                    <Text style={styles.transportTitle}>
+                      SIIRTOTIE: [{transportState.activeBearer}]
+                    </Text>
+                    <Text
+                      style={[
+                        styles.bleBadge,
+                        transportState.radioBleDisabled && styles.bleDisabledBadge,
+                      ]}
+                    >
+                      {transportState.radioBleDisabled
+                        ? 'BLE: OFF (ZERO-RF)'
+                        : 'E2EE: ACTIVE'}
+                    </Text>
+                  </View>
+
+                  <Text style={styles.txLogText}>{lastTxLog}</Text>
+                  {transportState.usbSerialConnected && loraDriverLabel.length > 0 && (
+                    <Text style={styles.txLogText}>LoRa-radio: {loraDriverLabel}</Text>
+                  )}
+                  {lastCotPreview.length > 0 && (
+                    <Text style={styles.cotLogText}>{lastCotPreview}</Text>
+                  )}
+
+                  <View style={styles.transportButtonsRow}>
+                    <TouchableOpacity
+                      style={[
+                        styles.transportToggleBtn,
+                        !transportState.cellularAvailable && styles.transportWarnBtn,
+                      ]}
+                      onPress={toggleCellularOutage}
+                    >
+                      <Text style={styles.transportBtnText}>
+                        {transportState.cellularAvailable
+                          ? '4G/5G: OK (Simuloi katve)'
+                          : '4G/5G: KATVE (LoRa aktiivinen)'}
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.transportToggleBtn,
+                        transportState.usbSerialConnected && styles.transportZeroRfBtn,
+                      ]}
+                      onPress={toggleUsbZeroRf}
+                    >
+                      <Text style={styles.transportBtnText}>
+                        {transportState.usbSerialConnected
+                          ? 'USB-C 115200: KYTKETTY'
+                          : 'Kytke USB-C (Zero-RF)'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {/* EMCON-radiokurin ohjauspalkki */}
+                <View
+                  style={[
+                    styles.emconCard,
+                    emconState.mode === RadioTxMode.NORMAL && styles.emconNormal,
+                    emconState.mode === RadioTxMode.BURST_MANUAL && styles.emconBurst,
+                    emconState.mode === RadioTxMode.RX_ONLY && styles.emconRxOnly,
+                  ]}
+                >
+                  <View style={styles.emconHeaderRow}>
+                    <Text style={styles.emconTitle}>
+                      EMCON RADIOKURI: [{emconState.mode}]
+                    </Text>
+                    <Text style={styles.emconSub}>
+                      {emconState.mode === RadioTxMode.RX_ONLY
+                        ? 'TX LUKITTU (VAIN KUUNTELU)'
+                        : 'LÄHETYS SALLITTU'}
+                    </Text>
+                  </View>
+
+                  <View style={styles.emconButtonsRow}>
+                    {emconState.mode !== RadioTxMode.RX_ONLY ? (
+                      <>
+                        <TouchableOpacity
+                          style={styles.emconBurstBtn}
+                          onPress={() =>
+                            setEmconState((prev) =>
+                              setRadioTxMode(
+                                prev,
+                                prev.mode === RadioTxMode.NORMAL
+                                  ? RadioTxMode.BURST_MANUAL
+                                  : RadioTxMode.NORMAL,
+                                true
+                              )
+                            )
+                          }
+                        >
+                          <Text style={styles.emconBtnText}>
+                            {emconState.mode === RadioTxMode.NORMAL
+                              ? 'Vaihda BURST_MANUAL'
+                              : 'Vaihda NORMAL'}
+                          </Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                          style={styles.emconSilenceBtn}
+                          onPress={() =>
+                            setEmconState((prev) =>
+                              setRadioTxMode(prev, RadioTxMode.RX_ONLY, true)
+                            )
+                          }
+                        >
+                          <Text style={styles.emconBtnText}>ASETA RX_ONLY (HILJAISUUS)</Text>
+                        </TouchableOpacity>
+                      </>
+                    ) : (
+                      <TouchableOpacity
+                        style={styles.emconUnlockBtn}
+                        delayLongPress={2000}
+                        onLongPress={() =>
+                          setEmconState((prev) =>
+                            setRadioTxMode(prev, RadioTxMode.NORMAL, true)
+                          )
+                        }
+                      >
+                        <Text style={styles.emconBtnText}>
+                          PAINA 2 SEKUNTIA PALAUTTAAKSESI LÄHETYKSEN (NORMAL)
+                        </Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </View>
+            </OverlaySheet>
+          )}
+
+          {openSheet === 'MORE' && (
+            <OverlaySheet
+              title="LISÄÄ"
+              accentColor={profileConfig.accentColor}
+              onClose={() => setOpenSheet(null)}
+            >
+                {/* Profiilivalitsin: HUNTER / SAR / TACTICAL */}
+                <View style={styles.profileRow}>
+                  {[ActiveProfile.HUNTER, ActiveProfile.SAR, ActiveProfile.TACTICAL].map(
+                    (prof) => {
+                      const isSelected = activeProfile === prof;
+                      const cfg = getProfileConfig(prof);
+                      return (
+                        <TouchableOpacity
+                          key={prof}
+                          style={[
+                            styles.profileChip,
+                            isSelected && {
+                              backgroundColor: cfg.accentColor,
+                              borderColor: '#FFFFFF',
+                            },
+                          ]}
+                          onPress={() => setActiveProfile(prof)}
+                        >
+                          <Text
+                            style={[
+                              styles.profileChipText,
+                              isSelected && { color: '#0A0E0A', fontWeight: 'bold' },
+                            ]}
+                          >
+                            {prof}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    }
+                  )}
+                </View>
+
+        {/* Karttataso ja offline-karttavalimuisti */}
+        <View style={styles.section}>
+                  <View style={styles.mapHeaderRow}>
+                    <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
+                      KARTTA: {showTopoLayer ? tileConfig.label.toUpperCase() : 'PERUSKARTTA'}
+                    </Text>
+                    <TouchableOpacity
+                      style={[
+                        styles.layerToggleButton,
+                        { borderColor: profileConfig.accentColor },
+                      ]}
+                      onPress={handleCycleMapLayer}
+                    >
+                      <Text style={styles.layerToggleText}>Vaihda taso</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.layerToggleButton,
+                        { borderColor: profileConfig.accentColor },
+                      ]}
+                      onPress={() => setShowTopoLayer((prev) => !prev)}
+                    >
+                      <Text style={styles.layerToggleText}>
+                        {showTopoLayer ? 'Maastokartta: PÄÄLLÄ' : 'Maastokartta: POIS'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* Offline-karttavalimuisti */}
+                  <View style={styles.offlineRow}>
+                    <TouchableOpacity
+                      style={[
+                        styles.offlineDownloadButton,
+                        isDownloadingTiles && styles.offlineButtonBusy,
+                      ]}
+                      onPress={handleDownloadOfflineTiles}
+                      disabled={isDownloadingTiles}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.offlineButtonText}>
+                        {isDownloadingTiles && tileDownload
+                          ? `Ladataan... ${getDownloadProgressPercent(tileDownload)} % (${
+                              tileDownload.completed + tileDownload.failed
+                            }/${tileDownload.total})`
+                          : 'Lataa kartta offline-tilaan'}
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[
+                        styles.offlineToggleButton,
+                        offlineCacheEnabled && {
+                          backgroundColor: '#1B5E20',
+                          borderColor: profileConfig.accentColor,
+                        },
+                      ]}
+                      onPress={handleToggleOfflineCache}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.offlineButtonText}>
+                        {offlineCacheEnabled
+                          ? 'Offline-v\u00E4limuisti: P\u00C4\u00C4LL\u00C4'
+                          : 'Offline-v\u00E4limuisti: POIS'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                  <Text style={styles.offlineStatusText}>
+                    {`Tallennettu: ${storedTileCount} tiilt\u00E4 (${onlineTileConfig.id})`}
+                    {offlineStatus ? ` | ${offlineStatus}` : ''}
+                    {offlineCacheEnabled && storedTileCount === 0
+                      ? ' | Ei tallennettuja tiili\u00E4 - lataa ensin'
+                      : ''}
+                  </Text>
         </View>
-      </ScrollView>
+
+                {selectedStand && (
+                  <View style={styles.section}>
+                    <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
+                      2. SEKTORITURVALLISUUS
+                    </Text>
+                    <View style={styles.areaButtonsRow}>
+                      <TouchableOpacity
+                        style={[
+                          styles.offlineToggleButton,
+                          audioWarningEnabled && {
+                            backgroundColor: '#1B5E20',
+                            borderColor: profileConfig.accentColor,
+                          },
+                        ]}
+                        onPress={handleToggleAudioWarning}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={styles.offlineButtonText}>
+                          {audioWarningEnabled
+                            ? 'Kuulosuojainten \u00E4\u00E4nivaroitus: P\u00C4\u00C4LL\u00C4'
+                            : 'Kuulosuojainten \u00E4\u00E4nivaroitus: POIS'}
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.offlineDownloadButton}
+                        onPress={() => playWarningTone(AudioWarningLevel.DANGER_SECTOR_ENTER)}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={styles.offlineButtonText}>{'Testaa merkki\u00E4\u00E4ni'}</Text>
+                      </TouchableOpacity>
+                    </View>
+                    <Text style={styles.offlineStatusText}>{audioStatus}</Text>
+                    <View style={styles.safetyBox}>
+                      <Text style={styles.safetyMain}>
+                        Sallittu pääsektori: vihreä 120°
+                      </Text>
+                      <Text style={styles.dangerHeader}>
+                        Lasketut naapurikieltokulmat (±15°):
+                      </Text>
+                      {dangerZones.map((zone) => (
+                        <View key={zone.standId} style={styles.dangerRow}>
+                          <Text style={styles.dangerStand}>{zone.standName}:</Text>
+                          <Text style={styles.dangerDegrees}>
+                            suunta {Math.round(zone.centerAngle)}° (KIELTO{' '}
+                            {Math.round(zone.startAngle)}° - {Math.round(zone.endAngle)}°)
+                          </Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                )}
+
+                {/* SAR & Taktiset kenttätoiminnot */}
+                <View style={styles.section}>
+                  <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
+                    SAR & TAKTISET TIETORAKENTEET
+                  </Text>
+                  <View style={styles.sarButtonsRow}>
+                    <TouchableOpacity
+                      style={styles.sarBtn}
+                      onPress={handleSendTrackDelta}
+                      disabled={!txAllowed}
+                    >
+                      <Text style={styles.sarBtnText}>Jaa TRACK_DELTA</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={styles.sarBtn}
+                      onPress={handleToggleSearchSector}
+                      disabled={!txAllowed}
+                    >
+                      <Text style={styles.sarBtnText}>
+                        {showSarSector ? 'Piilota Etsintälohko' : 'SEARCH_SECTOR (6p)'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  <TouchableOpacity
+                    style={[styles.sosButton, !txAllowed && styles.disabledButton]}
+                    onPress={handleTriggerSos}
+                    disabled={!txAllowed}
+                  >
+                    <Text style={styles.sosButtonText}>
+                      [SOS_ALERT — PRIORISOITU HÄTÄILMOITUS]
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View style={styles.section}>
+                  <Text style={[styles.sectionTitle, { color: profileConfig.accentColor }]}>
+                    GPS-AUTOMAATTI / TESTAUS
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.simButton}
+                    onPress={() => simulateStandArrival(huntingArea.stands[0])}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.simButtonText}>
+                      Simuloi: Saavu kohteeseen P1 Kuusikko (&lt; 20 m)
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Kaksivaiheinen Zeroize-hätätyhjennys */}
+                <View style={styles.zeroizeCard}>
+                  <Text style={styles.zeroizeHeader}>
+                    4. HÄTÄTYHJENNYS (ZEROIZE — KAKSIVAIHEINEN SUOJA)
+                  </Text>
+                  <Text style={styles.zeroizeDesc}>
+                    Avaimia muistissa: {zeroizeState.wiped ? '0 (TYHJENNETTY)' : 'AKTIIVINEN'}
+                  </Text>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.coverButton,
+                      zeroizeState.coverOpen && styles.coverButtonOpen,
+                    ]}
+                    onPress={() =>
+                      setZeroizeState((prev) =>
+                        setZeroizeCoverOpen(prev, !prev.coverOpen)
+                      )
+                    }
+                    disabled={zeroizeState.wiped}
+                  >
+                    <Text style={styles.coverButtonText}>
+                      {zeroizeState.coverOpen
+                        ? 'VAIHE 1: SUOJAKANSI AUKI (Napauta sulkeaksesi)'
+                        : 'VAIHE 1: AVAA SUOJAKANSI'}
+                    </Text>
+                  </TouchableOpacity>
+
+                  {zeroizeState.coverOpen && !zeroizeState.wiped && (
+                    <TouchableOpacity
+                      style={styles.slideZeroizeButton}
+                      delayLongPress={1500}
+                      onLongPress={() =>
+                        setZeroizeState((prev) => attemptSlideToZeroize(prev, 95))
+                      }
+                    >
+                      <Text style={styles.slideZeroizeText}>
+                        VAIHE 2: PIDÄ POHJASSA (&gt;85% LIUKU) — ZEROIZE NYT
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+            </OverlaySheet>
+          )}
+
+          <BottomActionPanel
+            accentColor={profileConfig.accentColor}
+            statusText={hunterState.status}
+            standText={
+              hunterState.standName
+                ? `${profileConfig.nodeLabel}: ${hunterState.standName}${
+                    distanceToCurrentStand !== null ? ` (${distanceToCurrentStand} m)` : ''
+                  }`
+                : `Ei ${profileConfig.nodeLabel.toLowerCase()}a`
+            }
+            headingLabel={headingStatus.label}
+            headingLevel={headingStatus.level}
+            lastShotText={lastShotLabel}
+            panel={bottomPanel}
+            readyLabel={profileConfig.readyActionLabel}
+            shotLabel={profileConfig.alertActionLabel}
+            onReady={handleReady}
+            onShot={handleShotFired}
+            onOutcome={handleOutcome}
+            onCancelShot={handleCancelShot}
+            openSheet={openSheet}
+            sosEnabled={txAllowed}
+            onQuickAction={handleQuickAction}
+          />
+        </View>
+      </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  screen: {
+    flex: 1,
+  },
+  mapFull: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: MAP_SCREEN_LAYERS.map,
+  },
+  mapFullscreen: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  overlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    flexDirection: 'column',
+  },
+  mapSpacer: {
+    flex: 1,
+  },
+  headingWarningBar: {
+    marginHorizontal: 8,
+    marginTop: 6,
+    backgroundColor: 'rgba(213, 0, 0, 0.92)',
+    borderColor: '#FFFFFF',
+    borderWidth: 2,
+    borderRadius: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    alignItems: 'center',
+    zIndex: MAP_SCREEN_LAYERS.headingWarning,
+    elevation: MAP_SCREEN_LAYERS.headingWarning,
+  },
   safeArea: {
     flex: 1,
     backgroundColor: '#0A0E0A',
