@@ -34,3 +34,7 @@ npm.cmd install                    # riippuvuuksien asennus
 ## Huomioita
 - `App.tsx` ja osa `src/utils/*.ts`-tiedostoista on tallennettu Windows-1252-koodauksella (ääkköset). Säilytä koodaus muokatessa.
 - Arkkitehtuuri tukee profiileja `HUNTER` / `SAR` / `TACTICAL` (ks. Stompy `extended_mvp_architecture_spec`).
+
+## Testiajo (GitHub Actions) ja merge
+- `.github/workflows/ci.yml` (`ci / test`) ajaa jokaisessa PR:ssä ja main-pushissa: `npm ci`, `npx jest --ci`, `npx tsc --noEmit`. Ei salaisuuksia.
+- Stompy `working_rules` sääntö 11: turva-PR:t (tagi `turva` tai turvallisuuslogiikka) mergeää aina käyttäjä. Muun PR:n automaatio saa mergetä (squash), kun `ci / test` on vihreä, PR on mergeattavissa eikä avoimia kommentteja ole.
