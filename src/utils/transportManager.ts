@@ -76,6 +76,32 @@ export function disconnectUsbSerial(state: TransportState): TransportState {
   };
 }
 
+/**
+ * Meshtastic-sillan (meshtasticSerialBridge.ts) tila siirtokerrokseen.
+ * USB-vayla on aktiivinen kattelyn ja yhteyden ajan; radion BLE naytetaan
+ * pois paalta vasta, kun silta on lahettanyt BLE-poiskomennon tai radio
+ * ilmoitti BLE:n jo olevan pois. Katkos tai virhe -> hallittu pudotus.
+ */
+export function applyMeshtasticLink(
+  state: TransportState,
+  link: {
+    state: 'DISCONNECTED' | 'HANDSHAKING' | 'CONNECTED' | 'ERROR';
+    bluetoothDisabled: boolean;
+  },
+  baudRate: number = 115200
+): TransportState {
+  if (link.state === 'DISCONNECTED' || link.state === 'ERROR') {
+    return disconnectUsbSerial(state);
+  }
+  return {
+    ...state,
+    usbSerialConnected: true,
+    baudRate,
+    radioBleDisabled: link.bluetoothDisabled,
+    activeBearer: TransportBearer.LORA_USB_SERIAL,
+  };
+}
+
 export function setCellularHealth(
   state: TransportState,
   available: boolean,
