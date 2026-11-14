@@ -1,0 +1,34 @@
+# Testiajo jokaiseen PR:ään ja main-pushiin (tiketti #79).
+# Automaatio saa mergetä muun kuin turva-PR:n vain, kun tämä ajo on vihreä
+# (Stompy working_rules, sääntö 11). Ei salaisuuksia eikä API-avaimia.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Asenna riippuvuudet
+        run: npm ci
+      - name: Jest
+        run: npx jest --ci
+      - name: TypeScript
+        run: npx tsc --noEmit
